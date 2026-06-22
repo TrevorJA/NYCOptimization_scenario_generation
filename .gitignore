@@ -1,0 +1,19 @@
+# Generated, regenerable outputs — never commit
+outputs/
+*.hdf5
+*.h5
+*.csv
+!docs/**/*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
