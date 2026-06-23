@@ -28,7 +28,7 @@ def test_empirical_cdf_normalize_is_uniform_per_axis():
 
 def test_subsample_returns_sorted_unique_subset():
     H = _clustered_hazard_image()
-    sel = subsample.hazard_filling_subsample(H, 20, seed=1, iters=2000)
+    sel = subsample.hazard_filling_subsample(H, 20, seed=1)
     assert sel.shape == (20,)
     assert len(set(sel.tolist())) == 20
     assert np.all(np.diff(sel) > 0)              # sorted, unique
@@ -57,7 +57,7 @@ def test_hazard_filling_beats_random_on_discrepancy():
         return subsample.coverage_metrics(X[sel], lb, ub)["L2_star_discrepancy"]
 
     hf = np.mean([
-        disc(subsample.hazard_filling_subsample(H, n, seed=s, iters=6000))
+        disc(subsample.hazard_filling_subsample(H, n, seed=s))
         for s in range(4)
     ])
     rand = np.mean([disc(subsample.random_subsample(H, n, seed=s)) for s in range(4)])
@@ -66,7 +66,7 @@ def test_hazard_filling_beats_random_on_discrepancy():
 
 def test_subsample_n_equals_m_returns_all():
     H = _clustered_hazard_image(M=12, d=2)
-    sel = subsample.hazard_filling_subsample(H, 12, seed=0, iters=100)
+    sel = subsample.hazard_filling_subsample(H, 12, seed=0)
     assert np.array_equal(sel, np.arange(12))
 
 

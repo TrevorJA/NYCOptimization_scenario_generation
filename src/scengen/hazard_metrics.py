@@ -185,3 +185,205 @@ def compute_hazard_image(
         for row in np.asarray(scenario_monthly, dtype=float)
     ]
     return np.asarray(rows, dtype=float), names
+
+
+# ---------------------------------------------------------------------------
+# Run-theory event descriptors (candidate hazard axes; asymmetric by tail)
+# ---------------------------------------------------------------------------
+#
+# Per-event, NOT averaged across events. The two tails use DIFFERENT, physically
+# faithful event models (per independent academic review): droughts are slow
+# depletion -> SSI run theory (deficit below a standardized threshold); floods
+# are fast pulses -> peaks-over-threshold (POT) on the daily series. A single
+# symmetric standardized index (negated SSI) is NOT used for floods: a gamma-fit
+# deficit index saturates the upper tail where floods live. Grounding:
+# Yevjevich (1967) run theory; Vicente-Serrano et al. (2012) SSI; McKee et al.
+# (1993) on accumulation timescale (SSI-6 for reservoir drought); the five
+# flow-regime facets and high-pulse indices of Richter et al. (1996, IHA) /
+# Olden & Poff (2003); Lang et al. (1999) POT/partial-duration series; Baker et
+# al. (2004) flashiness; Brunner et al. (2021) joint flood-drought framing.
+
+#: Dry (drought / low-flow) candidate axes: controlling-event SSI run-theory
+#: descriptors on the monthly aggregate NYC inflow (SSI-6 reservoir timescale).
+#: The magnitude/duration/intensity trio is collinear by construction (run
+#: theory: deficit ~ duration x intensity); the rate-of-change descriptors
+#: (onset/recovery; IHA Group 5; flash-drought lit Otkin 2018) are the
+#: orthogonal facet that yields a genuine SECOND drought axis after screening.
+DRY_EVENT_METRICS: tuple[str, ...] = (
+    "drought_deficit_volume",  # |sum SSI over run| — magnitude facet
+    "drought_duration",        # run length (months) — duration facet
+    "drought_peak_depth",      # |min SSI in run| — intensity
+    "drought_onset_rate",      # |peak SSI| / months to trough — rate of change
+    "drought_recovery_rate",   # |peak SSI| / recovery months — rate of change
+)
+
+#: Wet (flood / high-flow) candidate axes: critical peaks-over-threshold pulse
+#: descriptors on the daily aggregate NYC inflow (Q5 / 95th-pct threshold).
+WET_EVENT_METRICS: tuple[str, ...] = (
+    "flood_peak_magnitude",    # window max daily flow / reference mean — magnitude
+    "flood_pulse_duration",    # days above threshold in the critical pulse — duration
+    "flood_rise_rate",         # max 1-day rise of the critical rising limb / ref mean — rate
+)
+
+#: Full candidate pool screened down to the final low-redundancy axis set.
+CANDIDATE_EVENT_METRICS: tuple[str, ...] = DRY_EVENT_METRICS + WET_EVENT_METRICS
+
+
+def critical_event_descriptors(
+    ssi_series: pd.Series, *, end_threshold: int = 3, select: str = "controlling"
+) -> dict:
+    """Run-theory descriptors of the single controlling drought event.
+
+    Reuses SynHydro ``get_drought_metrics`` (Yevjevich run theory): an event is a
+    run of ``SSI < 0`` reaching ``SSI <= -1``, terminated by ``end_threshold``
+    consecutive non-negative steps. Per review, the default selector is
+    ``"controlling"`` = the run with the largest cumulative deficit (the
+    operationally binding event under fixed initial storage), which is more
+    stable than the deepest-severity argmax.
+
+    Args:
+        ssi_series: SSI series (DatetimeIndex).
+        end_threshold: Consecutive non-negative steps to terminate an event.
+        select: ``"controlling"`` (max |cumulative deficit|; default),
+            ``"deepest"`` (min severity), or ``"first"`` (earliest run).
+
+    Returns:
+        Dict with non-negative ``duration``, ``volume`` (|cumulative SSI|), and
+        ``depth`` (|peak SSI|). All zero when the scenario has no critical event.
+    """
+    from synhydro.droughts.ssi import get_drought_metrics  # lazy
+
+    dm = get_drought_metrics(ssi_series, end_drought_threshold_months=end_threshold)
+    if len(dm) == 0:
+        return {"duration": 0.0, "volume": 0.0, "depth": 0.0,
+                "onset_rate": 0.0, "recovery_rate": 0.0}
+    if select == "controlling":
+        i = dm["magnitude"].astype(float).abs().idxmax()
+    elif select == "deepest":
+        i = dm["severity"].astype(float).idxmin()
+    elif select == "first":
+        i = dm.index[0]
+    else:
+        raise ValueError(f"unknown select={select!r}")
+    crit = dm.loc[i]
+    depth = float(abs(crit["severity"]))
+
+    # Rate-of-change descriptors (orthogonal to magnitude/duration/intensity).
+    start = pd.Timestamp(crit["start"])
+    peak = pd.Timestamp(crit["max_severity_date"])
+    months_to_peak = max(1, (peak.year - start.year) * 12 + (peak.month - start.month))
+    recovery_months = max(1.0, float(crit.get("recovery_period", 0.0)))
+    return {
+        "duration": float(crit["duration"]),
+        "volume": float(abs(crit["magnitude"])),
+        "depth": depth,
+        "onset_rate": depth / months_to_peak,
+        "recovery_rate": depth / recovery_months,
+    }
+
+
+def pot_flood_descriptors(
+    daily: np.ndarray, *, threshold: float, ref_mean: float
+) -> dict:
+    """Peaks-over-threshold descriptors of the critical (largest-peak) high-flow pulse.
+
+    Floods are characterized by an asymmetric, peak-driven POT event model (Lang
+    et al. 1999; IHA high-pulse indices, Richter et al. 1996), not a standardized
+    index. The critical pulse is the above-``threshold`` run containing the
+    window's maximum daily flow.
+
+    Args:
+        daily: 1D daily aggregate inflow for the scenario window.
+        threshold: High-flow threshold (e.g. reference Q5 / 95th-pct daily flow).
+        ref_mean: Reference mean daily flow, used to non-dimensionalize magnitudes.
+
+    Returns:
+        Dict with ``peak_magnitude`` (window max / ``ref_mean``; always defined,
+        so no zero-inflation), ``pulse_duration`` (days above ``threshold`` in the
+        critical pulse), and ``rise_rate`` (max 1-day rise on the critical rising
+        limb / ``ref_mean``).
+    """
+    daily = np.asarray(daily, dtype=float)
+    ref_mean = float(ref_mean) if ref_mean > 0 else 1.0
+    peak_magnitude = float(daily.max() / ref_mean)
+
+    above = daily > threshold
+    if not above.any():
+        return {"peak_magnitude": peak_magnitude, "pulse_duration": 0.0, "rise_rate": 0.0}
+
+    peak_idx = int(np.argmax(daily))  # the global max is above threshold when any are
+    lo = peak_idx
+    while lo - 1 >= 0 and above[lo - 1]:
+        lo -= 1
+    hi = peak_idx
+    while hi + 1 < len(daily) and above[hi + 1]:
+        hi += 1
+    pulse_duration = float(hi - lo + 1)
+
+    # Rising limb: from one day before pulse onset up to the peak.
+    onset = max(0, lo - 1)
+    rising = daily[onset:peak_idx + 1]
+    rise_rate = float(max(np.diff(rising).max(), 0.0) / ref_mean) if rising.size > 1 else 0.0
+    return {
+        "peak_magnitude": peak_magnitude,
+        "pulse_duration": pulse_duration,
+        "rise_rate": rise_rate,
+    }
+
+
+def compute_candidate_hazard_image(
+    scenario_monthly: np.ndarray,
+    scenario_daily: np.ndarray,
+    reference_monthly: np.ndarray,
+    reference_daily: np.ndarray,
+    *,
+    dry_timescale: int = 6,
+    dist: str = "gamma",
+    reference_start: str = "1945-10-01",
+    dry_end_threshold: int = 3,
+    dry_select: str = "controlling",
+    flood_threshold_pct: float = 95.0,
+) -> tuple[np.ndarray, list[str]]:
+    """Compute the 6-candidate wet+dry event-descriptor hazard image.
+
+    Dry axes: SSI-``dry_timescale`` (reservoir-drought timescale; SSI-6 default,
+    McKee et al. 1993) on the monthly aggregate NYC inflow, controlling-event run
+    theory. Wet axes: peaks-over-threshold on the daily aggregate NYC inflow with
+    a ``flood_threshold_pct`` (Q5/95th-pct) threshold and mean-daily
+    normalization, both fixed once on the historical reference.
+
+    Args:
+        scenario_monthly: ``(n, n_months)`` monthly aggregate NYC inflow.
+        scenario_daily: ``(n, n_days)`` daily aggregate NYC inflow (same scenarios).
+        reference_monthly: 1D historical monthly aggregate inflow (dry SSI fit).
+        reference_daily: 1D historical daily aggregate inflow (flood threshold + mean).
+        dry_timescale: Months accumulated for the drought SSI (SSI-6 default).
+        dist: SSI fitting distribution.
+        reference_start: October-aligned start for the dry SSI fit.
+        dry_end_threshold: Drought-event recovery hysteresis (months).
+        dry_select: Controlling-event selector (see :func:`critical_event_descriptors`).
+        flood_threshold_pct: Percentile of the reference daily flow used as the
+            POT high-flow threshold (95 = Q5).
+
+    Returns:
+        ``(H, list(CANDIDATE_EVENT_METRICS))`` with columns ordered dry then wet.
+    """
+    dry_calc = fit_reference_ssi(
+        reference_monthly, timescale=dry_timescale, dist=dist, start_date=reference_start
+    )
+    ref_daily = np.asarray(reference_daily, dtype=float)
+    threshold = float(np.percentile(ref_daily, flood_threshold_pct))
+    ref_mean = float(ref_daily.mean())
+
+    scenario_monthly = np.asarray(scenario_monthly, dtype=float)
+    scenario_daily = np.asarray(scenario_daily, dtype=float)
+    rows = []
+    for m_row, d_row in zip(scenario_monthly, scenario_daily):
+        dry_ssi = dry_calc.transform(flows_to_series(m_row, freq="MS"))
+        d = critical_event_descriptors(dry_ssi, end_threshold=dry_end_threshold, select=dry_select)
+        w = pot_flood_descriptors(d_row, threshold=threshold, ref_mean=ref_mean)
+        rows.append([
+            d["volume"], d["duration"], d["depth"], d["onset_rate"], d["recovery_rate"],
+            w["peak_magnitude"], w["pulse_duration"], w["rise_rate"],
+        ])
+    return np.asarray(rows, dtype=float), list(CANDIDATE_EVENT_METRICS)

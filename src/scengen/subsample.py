@@ -2,26 +2,29 @@
 
 Selects ``n`` realizations from the master ensemble's hazard image ``H``.
 
-  - ``hazard_filling_subsample`` (methods 4.6): the contribution. A *stratified
-    maximin space-filling design with cLHS-style marginal (quantile-stratum)
-    conditioning* -- NOT cLHS (the parent-correlation term that defines cLHS is
-    omitted by construction, since it is antithetical to uniform hazard
-    coverage). Marginal quantile-stratification after Minasny & McBratney (2006);
-    the maximin / phi_p separation term after Morris & Mitchell (1995) and
-    Johnson et al. (1990).
+  - ``hazard_filling_subsample`` (methods 4.6): the contribution. **LHS +
+    nearest-neighbor** space-filling selection over the empirical-CDF-normalized
+    hazard image -- a Latin hypercube is drawn over the (uniformized) hazard
+    box and each anchor snaps to the nearest not-yet-used scenario. This is the
+    ``pick_space_filling_subset`` algorithm named in the methods note (§4.6
+    "Implementation"), applied in normalized hazard space so "uniform in hazard
+    space" is well-defined under skewed marginals. It is deliberately the
+    simplest defensible space-filling design: no annealing, no tuning, and --
+    because it does not optimize a discrepancy objective -- L2-star discrepancy
+    remains an *independent* build-QC gate (methods 6a) rather than the thing it
+    optimized.
   - ``random_subsample`` (methods 4.2): random-without-replacement baseline.
 
-``coverage_metrics`` and ``generate_lhs_samples`` are COPIED (not imported) from
-MOEA-FIND ``src/discovery/analysis.py`` so this repo has no dependency on that
-repo; the simulated-annealing selector is net-new. Pure numpy/scipy -- no SSI,
-no SynHydro, no pywrdrb -- so it is testable on any hazard matrix.
+``coverage_metrics``, ``generate_lhs_samples``, and the LHS+NN selection
+algorithm are COPIED (not imported) from MOEA-FIND ``src/discovery/analysis.py``
+so this repo has no dependency on that repo. Pure numpy/scipy -- no SSI, no
+SynHydro, no pywrdrb -- so it is testable on any hazard matrix.
 """
 
 from __future__ import annotations
 
 import numpy as np
-from scipy.spatial import KDTree
-from scipy.spatial.distance import pdist
+from scipy.spatial import KDTree, cKDTree
 from scipy.stats import rankdata
 from scipy.stats.qmc import LatinHypercube, discrepancy
 
@@ -73,7 +76,9 @@ def empirical_cdf_normalize(H: np.ndarray) -> np.ndarray:
 
     Makes "uniform in hazard space" well-defined under skewed marginals: after
     this transform every axis is (approximately) uniform on the unit interval,
-    so equal-width strata are equal-probability strata.
+    so a Latin hypercube over the unit box fills the hazard manifold evenly.
+    Uniform-in-rank selection is quantile stratification: marginally
+    *representative* of the pool (the faithful arm).
 
     Args:
         H: ``(M, d)`` hazard image.
@@ -86,6 +91,36 @@ def empirical_cdf_normalize(H: np.ndarray) -> np.ndarray:
     out = np.empty_like(H)
     for a in range(H.shape[1]):
         out[:, a] = rankdata(H[:, a], method="average") / M
+    return out
+
+
+def minmax_normalize(
+    H: np.ndarray, *, lo_pct: float = 0.0, hi_pct: float = 100.0
+) -> np.ndarray:
+    """Map each hazard axis to [0, 1] by its ABSOLUTE range (optionally robust).
+
+    Unlike :func:`empirical_cdf_normalize`, this preserves the metric's absolute
+    spacing, so a Latin hypercube over the unit box targets uniform coverage of
+    the *magnitude* range. Uniform-in-magnitude selection over a skewed pool
+    over-represents the sparse tails relative to their frequency (the distorted
+    arm). ``lo_pct``/``hi_pct`` set robust percentile bounds so a few outliers do
+    not dominate the range (``0``/``100`` = full range; ``1``/``99`` = robust).
+
+    Args:
+        H: ``(M, d)`` hazard image.
+        lo_pct, hi_pct: Per-axis lower/upper percentile bounds for the range.
+
+    Returns:
+        ``(M, d)`` array with each column min-max scaled and clipped to [0, 1].
+    """
+    H = np.asarray(H, dtype=float)
+    out = np.empty_like(H)
+    for a in range(H.shape[1]):
+        lo = np.percentile(H[:, a], lo_pct)
+        hi = np.percentile(H[:, a], hi_pct)
+        if hi <= lo:
+            hi = lo + 1e-12
+        out[:, a] = np.clip((H[:, a] - lo) / (hi - lo), 0.0, 1.0)
     return out
 
 
@@ -102,114 +137,131 @@ def random_subsample(H: np.ndarray, n: int, *, seed: int) -> np.ndarray:
     return np.sort(rng.choice(M, size=n, replace=False))
 
 
-def _occupancy_cost(Xsub: np.ndarray, n_strata: int) -> float:
-    """Sum over axes of |stratum occupancy - target| (cLHS marginal condition).
-
-    ``Xsub`` is already empirical-CDF-normalized, so equal-width bins are
-    equal-probability strata; the per-stratum target is ``n / n_strata``.
-    """
-    n, d = Xsub.shape
-    target = n / n_strata
-    cost = 0.0
-    for a in range(d):
-        bins = np.clip((Xsub[:, a] * n_strata).astype(int), 0, n_strata - 1)
-        counts = np.bincount(bins, minlength=n_strata)
-        cost += np.abs(counts - target).sum()
-    return float(cost)
-
-
-def _maximin_phi_p(Xsub: np.ndarray, p: int) -> float:
-    """phi_p maximin surrogate (Morris & Mitchell 1995); lower = better spread."""
-    if len(Xsub) < 2:
-        return 0.0
-    d = pdist(Xsub)
-    d = np.maximum(d, 1e-12)
-    return float((np.sum(d ** (-p))) ** (1.0 / p))
-
-
 def hazard_filling_subsample(
     H: np.ndarray,
     n: int,
     *,
     seed: int,
-    n_strata: int | None = None,
-    maximin_weight: float = 0.3,
-    p: int = 15,
-    iters: int = 20000,
-    t0: float = 1.0,
-    cooling: float = 0.9995,
+    k_pool: int | None = None,
 ) -> np.ndarray:
-    r"""Stratified maximin space-filling subsample over the hazard manifold (methods 4.6).
+    """LHS + nearest-neighbor space-filling subsample over the hazard manifold (methods 4.6).
 
-    Minimizes, by simulated annealing over size-``n`` subsets ``T`` of the
-    empirical-CDF-normalized hazard image::
+    Algorithm (``pick_space_filling_subset``, copied from MOEA-FIND
+    ``src/discovery/analysis.py`` and applied in normalized hazard space):
 
-        Phi(T) = occupancy_mismatch(T) + maximin_weight * phi_p(T)
+        1. Normalize ``H`` per axis to (0, 1] by its empirical CDF, so each axis
+           is uniform and a Latin hypercube over the unit box targets uniform
+           coverage of the hazard manifold.
+        2. Draw ``n`` Latin-hypercube anchors over the unit box.
+        3. For each anchor, snap to the nearest scenario not already chosen
+           (KDTree query with a small candidate pool; global fallback if the
+           pool is exhausted of unused neighbors).
 
-    The occupancy term is the cLHS marginal (quantile-stratum) condition; the
-    phi_p term is the maximin separation. There is NO parent-correlation term
-    (the deliberate distortion toward uniform hazard coverage).
+    There is no occupancy/maximin objective and no annealing: the design is the
+    deterministic-given-seed nearest-neighbor projection of an LHS plan. Because
+    it does not minimize a discrepancy objective, L2-star discrepancy remains an
+    independent build-QC gate (methods 6a).
 
     Args:
         H: ``(M, d)`` hazard image (raw metric values; normalized internally).
         n: Subsample size.
-        seed: RNG seed (the selector is stochastic; replicate over seeds).
-        n_strata: Quantile strata per axis (default ``n`` -> one point per stratum).
-        maximin_weight: Weight on the phi_p separation term relative to occupancy.
-        p: phi_p exponent (larger -> closer to true maximin).
-        iters: Simulated-annealing iteration budget.
-        t0: Initial temperature.
-        cooling: Geometric cooling factor applied each iteration.
+        seed: LHS RNG seed (replicate the design over seeds).
+        k_pool: Neighbors queried per anchor before the global fallback; defaults
+            to ``min(max(8, n // 4), M)`` (the MOEA-FIND heuristic).
 
     Returns:
         Sorted integer array of ``n`` selected row indices into ``H``.
     """
-    X = empirical_cdf_normalize(H)
-    M = X.shape[0]
+    return _lhs_nn_select(empirical_cdf_normalize(H), n, seed=seed, k_pool=k_pool)
+
+
+def absolute_filling_subsample(
+    H: np.ndarray,
+    n: int,
+    *,
+    seed: int,
+    lo_pct: float = 0.0,
+    hi_pct: float = 100.0,
+    k_pool: int | None = None,
+) -> np.ndarray:
+    """LHS + nearest-neighbor subsample in ABSOLUTE (min-max) hazard space.
+
+    The distorted-arm counterpart to :func:`hazard_filling_subsample`: filling is
+    uniform over each axis's *magnitude* range rather than its rank, so the
+    selected subset over-represents the sparse tails relative to frequency
+    (genuine probability distortion toward extreme-hazard coverage). Over a
+    heavy-tailed pool the full-range version can fixate on a few outliers; pass
+    ``lo_pct``/``hi_pct`` (e.g. 1/99) for robust bounds.
+
+    Args:
+        H: ``(M, d)`` hazard image (raw metric values; normalized internally).
+        n: Subsample size.
+        seed: LHS RNG seed.
+        lo_pct, hi_pct: Robust percentile bounds for the absolute range.
+        k_pool: Neighbors queried per anchor before the global fallback.
+
+    Returns:
+        Sorted integer array of ``n`` selected row indices into ``H``.
+    """
+    return _lhs_nn_select(
+        minmax_normalize(H, lo_pct=lo_pct, hi_pct=hi_pct), n, seed=seed, k_pool=k_pool
+    )
+
+
+def _lhs_nn_select(
+    X: np.ndarray, n: int, *, seed: int, k_pool: int | None = None
+) -> np.ndarray:
+    """LHS + nearest-neighbor selection over points already normalized to [0, 1]^d.
+
+    Draws ``n`` Latin-hypercube anchors over the unit box and snaps each to the
+    nearest not-yet-used point (KDTree query with a small candidate pool; global
+    fallback if the pool is exhausted of unused neighbors). Shared by the
+    rank-space (faithful) and absolute-space (distorted) selectors so they differ
+    only in the normalization of ``X``.
+    """
+    X = np.asarray(X, dtype=float)
+    M, d = X.shape
     if n > M:
         raise ValueError(f"requested {n} but only {M} available")
     if n == M:
         return np.arange(M)
-    n_strata = n_strata or n
-    rng = np.random.default_rng(seed)
 
-    def cost(idx: np.ndarray) -> float:
-        sub = X[idx]
-        return _occupancy_cost(sub, n_strata) + maximin_weight * _maximin_phi_p(sub, p)
+    anchors = generate_lhs_samples(n, d, np.zeros(d), np.ones(d), seed=seed)
 
-    sel = rng.choice(M, size=n, replace=False)
-    in_set = np.zeros(M, dtype=bool)
-    in_set[sel] = True
-    cur = cost(sel)
-    best_sel, best_cost = sel.copy(), cur
-    temp = t0
-    outside = np.where(~in_set)[0]
-
-    for _ in range(iters):
-        # Propose: swap one selected member for one non-member.
-        rem_pos = int(rng.integers(n))
-        add_pos = int(rng.integers(len(outside)))
-        old_idx, new_idx = sel[rem_pos], outside[add_pos]
-        sel[rem_pos] = new_idx
-        cand = cost(sel)
-        delta = cand - cur
-        if delta <= 0 or rng.random() < np.exp(-delta / max(temp, 1e-12)):
-            cur = cand
-            outside[add_pos] = old_idx  # keep the swap; old member now outside
-            if cur < best_cost:
-                best_cost, best_sel = cur, sel.copy()
+    tree = cKDTree(X)
+    chosen: list[int] = []
+    used: set[int] = set()
+    if k_pool is None:
+        k_pool = min(max(8, n // 4), M)
+    for anchor in anchors:
+        _, idxs = tree.query(anchor, k=k_pool)
+        idxs = np.atleast_1d(idxs)
+        for i in idxs:
+            i = int(i)
+            if i not in used:
+                used.add(i)
+                chosen.append(i)
+                break
         else:
-            sel[rem_pos] = old_idx       # revert
-        temp *= cooling
-
-    return np.sort(best_sel)
+            # Candidate pool exhausted of unused neighbors; global nearest.
+            mask = np.ones(M, dtype=bool)
+            mask[list(used)] = False
+            remaining = np.where(mask)[0]
+            if len(remaining) == 0:
+                break
+            d2 = ((X[remaining] - anchor) ** 2).sum(axis=1)
+            pick = int(remaining[np.argmin(d2)])
+            used.add(pick)
+            chosen.append(pick)
+    return np.sort(np.array(chosen, dtype=int))
 
 
 def support_point_subsample(H: np.ndarray, n: int, *, seed: int) -> np.ndarray:
     """Energy-distance support points (methods 4.6.1; Mak & Joseph 2018).
 
-    Placeholder for the faithful-x-designed control design; not part of the
-    initial hazard_filling draft.
+    Placeholder for the faithful-x-designed control design (the §4.6.1
+    supplement that isolates uniform-coverage benefits from designed-subsampling
+    benefits). Not part of the hazard-filling selector.
 
     Raises:
         NotImplementedError: stub.

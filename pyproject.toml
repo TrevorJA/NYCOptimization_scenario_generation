@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 # Local sibling packages are expected to be installed editable in the same venv:
-#   pip install -e ../SynHydro -e ../MOEA-FIND
+#   pip install -e ../SynHydro 
 # (kept out of [project.dependencies] because they are path installs, not PyPI.)
 
 [tool.setuptools.packages.find]

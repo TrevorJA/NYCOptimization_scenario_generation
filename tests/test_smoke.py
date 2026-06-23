@@ -80,11 +80,9 @@ def test_manifest_roundtrip(tmp_path):
 @pytest.mark.parametrize(
     "call",
     [
-        # Still-stubbed surfaces (subsample + hazard_metrics are now implemented
-        # and covered by test_subsample.py / test_hazard_metrics.py).
+        # Still-stubbed surfaces (subsample, hazard_metrics, and the coverage
+        # diagnostics are now implemented and covered by their own tests).
         lambda: subsample.support_point_subsample(np.zeros((10, 3)), 5, seed=0),
-        lambda: diagnostics.expected_random_discrepancy(5, 3),
-        lambda: diagnostics.coverage_report(np.zeros((5, 3))),
     ],
 )
 def test_stubs_raise(call):
