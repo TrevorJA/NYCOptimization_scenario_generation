@@ -1,9 +1,10 @@
 """screen_hazard_axes.py - choose a low-redundancy wet+dry hazard-axis set.
 
-Computes the 6-candidate run-theory event-descriptor hazard image (3 drought +
-3 flood axes; :mod:`scengen.hazard_metrics`) on a staged master pool, then runs
-the Olden & Poff (2003) screening pipeline to recommend a parsimonious,
-low-redundancy axis set spanning both tails:
+Reads the candidate hazard image streamed at candidate-pool generation
+(``hazard_image.npz``; 3+ drought and 3+ flood run-theory event descriptors, see
+:mod:`scengen.hazard_metrics`) and runs the Olden & Poff (2003) screening
+pipeline to recommend a parsimonious, low-redundancy axis set spanning both
+tails:
 
     1. per-metric spread     - drop degenerate axes (near-constant, zero-IQR,
                                heavy skew, or a >50% point mass at one value,
@@ -15,14 +16,14 @@ low-redundancy axis set spanning both tails:
                                axes the space-filling subsample must fill, which
                                sets the N >= q^m sampling budget
 
-Reads the staged pool's HDF5 (via SynHydro) and the historical reference inflow
-CSV directly (no pywrdrb dependency). Exploratory: rerun while iterating the
-candidate definitions / timescales.
+Operates on the hazard image alone -- no pool timeseries, no SynHydro, no
+pywrdrb -- so it scales to a very large candidate pool. Exploratory: rerun while
+iterating the candidate metric definitions / timescales.
 
 Usage (from the scenario-generation repo root)::
 
     python scripts/screen_hazard_axes.py \
-        --pool-dir ../NYCOptimization/outputs/synthetic_ensembles/kn_5yr_n200
+        --ensemble-dir ../NYCOptimization/outputs/synthetic_ensembles/hazfill_5yr_n64_s0
 """
 
 from __future__ import annotations
@@ -36,32 +37,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-import pandas as pd  # noqa: E402
 
 from scengen import diagnostics as dg  # noqa: E402
-from scengen import hazard_metrics as hm  # noqa: E402
-from scengen.hazard_filling import (  # noqa: E402
-    daily_to_monthly,
-    load_ensemble_daily_aggregate,
-    load_ensemble_monthly_aggregate,
-)
+from scengen.hazard_filling import DEFAULT_AXIS_PRIORITY, select_balanced_axes  # noqa: E402
 
-_DEFAULT_POOL = "../NYCOptimization/outputs/synthetic_ensembles/kn_5yr_n200"
-_DEFAULT_REFERENCE_CSV = (
-    "../Pywr-DRB/src/pywrdrb/data/flows/pub_nhmv10_BC_withObsScaled/"
-    "catchment_inflow_mgd.csv"
-)
+_DEFAULT_ENSEMBLE = "../NYCOptimization/outputs/synthetic_ensembles/hazfill_5yr_n64_s0"
 
 
-def _load_reference(csv_path: Path, nodes) -> tuple[np.ndarray, np.ndarray]:
-    """Historical (monthly, daily) aggregate NYC inflow from the reference CSV."""
-    Q = pd.read_csv(csv_path, index_col=0, parse_dates=True)
-    daily = Q.loc[:, list(nodes)].sum(axis=1)
-    monthly = daily_to_monthly(daily, agg="mean")
-    return monthly, daily.to_numpy(dtype=float)
-
-
-def plot_correlation(rho, axes, out_path: Path) -> None:
+def plot_correlation(rho: np.ndarray, axes: list[str], out_path: Path) -> None:
+    """Heatmap of the Spearman |rho| matrix between the surviving candidate axes."""
     fig, a = plt.subplots(figsize=(5.6, 4.8))
     im = a.imshow(np.abs(rho), vmin=0, vmax=1, cmap="magma_r")
     a.set_xticks(range(len(axes)))
@@ -79,7 +63,8 @@ def plot_correlation(rho, axes, out_path: Path) -> None:
     plt.close(fig)
 
 
-def plot_scree(pca, out_path: Path) -> None:
+def plot_scree(pca: dict, out_path: Path) -> None:
+    """Broken-stick scree plot of the chosen axis set's effective dimensionality."""
     evr, bs = pca["explained_variance_ratio"], pca["broken_stick"]
     x = np.arange(1, len(evr) + 1)
     fig, a = plt.subplots(figsize=(5.2, 3.6))
@@ -98,36 +83,23 @@ def plot_scree(pca, out_path: Path) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--pool-dir", type=Path, default=Path(_DEFAULT_POOL))
-    p.add_argument("--reference-csv", type=Path, default=Path(_DEFAULT_REFERENCE_CSV))
+    p.add_argument("--ensemble-dir", type=Path, default=Path(_DEFAULT_ENSEMBLE),
+                   help="Directory holding the pool's hazard_image.npz.")
     p.add_argument("--out-dir", type=Path, default=None)
-    p.add_argument("--dry-timescale", type=int, default=6,
-                   help="Drought SSI accumulation in months (SSI-6 reservoir default).")
-    p.add_argument("--flood-threshold-pct", type=float, default=95.0,
-                   help="POT high-flow threshold percentile of reference daily flow (95 = Q5).")
     p.add_argument("--redundancy-threshold", type=float, default=0.7)
     args = p.parse_args()
 
-    pool_hdf5 = args.pool_dir / "catchment_inflow_mgd.hdf5"
-    if not pool_hdf5.exists():
-        raise SystemExit(f"pool HDF5 not found: {pool_hdf5}")
-    nodes = hm.DEFAULT_NYC_INFLOW_NODES
-
-    ref_monthly, ref_daily = _load_reference(args.reference_csv, nodes)
-    pool_monthly, ids = load_ensemble_monthly_aggregate(pool_hdf5, nodes, agg="mean")
-    pool_daily, _ = load_ensemble_daily_aggregate(pool_hdf5, nodes)
-    print(f"[screen] pool={pool_monthly.shape[0]} scenarios "
-          f"(months={pool_monthly.shape[1]}, days={pool_daily.shape[1]}); "
-          f"reference months={len(ref_monthly)} days={len(ref_daily)}")
-
-    H, axes = hm.compute_candidate_hazard_image(
-        pool_monthly, pool_daily, ref_monthly, ref_daily,
-        dry_timescale=args.dry_timescale, flood_threshold_pct=args.flood_threshold_pct,
-    )
+    img_path = args.ensemble_dir / "hazard_image.npz"
+    if not img_path.exists():
+        raise SystemExit(
+            f"hazard_image.npz not found in {args.ensemble_dir}. Generate the candidate "
+            f"pool first (NYCOptimization step 02/03)."
+        )
+    img = dg.load_hazard_image(img_path)
+    H, axes = img["H"], img["hazard_axes"]
+    print(f"[screen] pool={H.shape[0]} scenarios, {H.shape[1]} candidate axes")
 
     # --- Olden & Poff screen ------------------------------------------------
-    from scengen.hazard_filling import DEFAULT_AXIS_PRIORITY, select_balanced_axes
-
     spread = dg.per_metric_spread(H, axes)
     kept = [a for a in axes if not spread[a]["degenerate"]]
     keep_idx = [axes.index(a) for a in kept]
@@ -146,7 +118,7 @@ def main() -> None:
         "effective_dimension": 1,
     }
 
-    out_dir = args.out_dir or (args.pool_dir / "axis_screen")
+    out_dir = args.out_dir or (args.ensemble_dir / "axis_screen")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n[screen] per-metric spread (degenerate axes dropped):")
@@ -174,7 +146,7 @@ def main() -> None:
         print(f"[screen]   N=64 gives ~{n64_q:.1f} levels/axis at PR={pr:.2f}")
 
     summary = {
-        "pool": str(args.pool_dir),
+        "ensemble_dir": str(args.ensemble_dir),
         "candidate_axes": axes,
         "spread": spread,
         "surviving_axes": kept,

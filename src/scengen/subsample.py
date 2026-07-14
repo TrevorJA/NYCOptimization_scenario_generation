@@ -1,19 +1,38 @@
-"""Subsampling selectors (methods 4.6, 4.2).
+"""Hazard-space subsampling selectors (methods 4.6, 4.2).
 
-Selects ``n`` realizations from the master ensemble's hazard image ``H``.
+Selects ``n`` realizations from a candidate pool's hazard image ``H``.
 
-  - ``hazard_filling_subsample`` (methods 4.6): the contribution. **LHS +
-    nearest-neighbor** space-filling selection over the empirical-CDF-normalized
-    hazard image -- a Latin hypercube is drawn over the (uniformized) hazard
-    box and each anchor snaps to the nearest not-yet-used scenario. This is the
-    ``pick_space_filling_subset`` algorithm named in the methods note (§4.6
-    "Implementation"), applied in normalized hazard space so "uniform in hazard
-    space" is well-defined under skewed marginals. It is deliberately the
-    simplest defensible space-filling design: no annealing, no tuning, and --
-    because it does not optimize a discrepancy objective -- L2-star discrepancy
-    remains an *independent* build-QC gate (methods 6a) rather than the thing it
-    optimized.
-  - ``random_subsample`` (methods 4.2): random-without-replacement baseline.
+**Why these selectors SELECT rather than GENERATE.** Hazard coordinates (drought
+deficit volume, flood peak magnitude, ...) are *emergent* properties of a
+realized flow sequence: no generator can be asked to emit a realization at a
+prescribed drought severity, because severity is only known after the sequence
+exists. A hazard-space design therefore has nothing to generate *to* -- it must
+SELECT FROM a finite candidate pool, and its Latin-hypercube anchors must snap
+to the nearest real pool member. This nearest-neighbor snap is the whole reason
+the selector exists.
+
+The contrast is with *input*-space (forcing-parameter) stratification: the
+forcing parameters ``theta`` ARE a knob on the generator, so an input-space
+design draws an LHS over ``theta`` and generates one realization per design
+point. It never subsamples, and there is nothing to snap to. That design lives
+in the generator (``forcing_space.sample_harmonic_forcing(method="lhs")``), not
+in this module.
+
+Selectors here:
+
+  - ``hazard_filling_subsample`` (methods 4.6): the contribution. LHS +
+    nearest-neighbor space-filling selection over the empirical-CDF-normalized
+    hazard image, so "uniform in hazard space" is well-defined under skewed
+    marginals (the faithful / rank-space arm).
+  - ``absolute_filling_subsample``: the same selector in absolute (min-max)
+    magnitude space -- a retained non-campaign sensitivity, not a campaign arm.
+  - ``random_subsample`` (methods 4.2): the random-without-replacement baseline
+    that the coverage-vs-random QC gate compares against.
+
+The selector is deterministic given its seed: an LHS plan projected onto the
+pool by nearest neighbor. There is no discrepancy objective, no annealing, and
+no tuning -- so L2-star discrepancy stays an *independent* build-QC gate
+(methods 6a) rather than the quantity the selector optimized.
 
 ``coverage_metrics``, ``generate_lhs_samples``, and the LHS+NN selection
 algorithm are COPIED (not imported) from MOEA-FIND ``src/discovery/analysis.py``
@@ -153,14 +172,16 @@ def hazard_filling_subsample(
            is uniform and a Latin hypercube over the unit box targets uniform
            coverage of the hazard manifold.
         2. Draw ``n`` Latin-hypercube anchors over the unit box.
-        3. For each anchor, snap to the nearest scenario not already chosen
-           (KDTree query with a small candidate pool; global fallback if the
-           pool is exhausted of unused neighbors).
+        3. Snap each anchor to the nearest scenario not already chosen (KDTree
+           query over the candidate pool; global fallback if the local pool is
+           exhausted of unused neighbors). The snap is forced by the nature of
+           hazard coordinates: they are emergent from a realized sequence, so
+           the design can only select an existing pool member near the anchor,
+           never generate a realization at the anchor.
 
-    There is no occupancy/maximin objective and no annealing: the design is the
-    deterministic-given-seed nearest-neighbor projection of an LHS plan. Because
-    it does not minimize a discrepancy objective, L2-star discrepancy remains an
-    independent build-QC gate (methods 6a).
+    The result is the deterministic-given-seed nearest-neighbor projection of an
+    LHS plan; no discrepancy objective is optimized, so L2-star discrepancy
+    remains an independent build-QC gate (methods 6a).
 
     Args:
         H: ``(M, d)`` hazard image (raw metric values; normalized internally).
@@ -186,12 +207,14 @@ def absolute_filling_subsample(
 ) -> np.ndarray:
     """LHS + nearest-neighbor subsample in ABSOLUTE (min-max) hazard space.
 
-    The distorted-arm counterpart to :func:`hazard_filling_subsample`: filling is
-    uniform over each axis's *magnitude* range rather than its rank, so the
-    selected subset over-represents the sparse tails relative to frequency
-    (genuine probability distortion toward extreme-hazard coverage). Over a
-    heavy-tailed pool the full-range version can fixate on a few outliers; pass
-    ``lo_pct``/``hi_pct`` (e.g. 1/99) for robust bounds.
+    The distorted counterpart to :func:`hazard_filling_subsample`, retained as a
+    non-campaign sensitivity: filling is uniform over each axis's *magnitude*
+    range rather than its rank, so the selected subset over-represents the sparse
+    tails relative to their frequency (genuine probability distortion toward
+    extreme-hazard coverage). Over a heavy-tailed pool the full-range version can
+    fixate on a few outliers; pass ``lo_pct``/``hi_pct`` (e.g. 1/99) for robust
+    bounds. Same LHS + nearest-neighbor snap, same emergent-coordinate rationale
+    -- only the normalization of the hazard image differs.
 
     Args:
         H: ``(M, d)`` hazard image (raw metric values; normalized internally).
@@ -211,13 +234,28 @@ def absolute_filling_subsample(
 def _lhs_nn_select(
     X: np.ndarray, n: int, *, seed: int, k_pool: int | None = None
 ) -> np.ndarray:
-    """LHS + nearest-neighbor selection over points already normalized to [0, 1]^d.
+    """LHS + nearest-neighbor selection over pool points already normalized to [0, 1]^d.
 
     Draws ``n`` Latin-hypercube anchors over the unit box and snaps each to the
-    nearest not-yet-used point (KDTree query with a small candidate pool; global
-    fallback if the pool is exhausted of unused neighbors). Shared by the
-    rank-space (faithful) and absolute-space (distorted) selectors so they differ
-    only in the normalization of ``X``.
+    nearest not-yet-used pool point (KDTree query over a local candidate pool;
+    global fallback if that pool is exhausted of unused neighbors). The snap is
+    what makes this a *selection* rather than a *generation* design -- see the
+    module docstring on why hazard coordinates cannot be generated to.
+
+    Shared by the rank-space (faithful) and absolute-space (distorted) hazard
+    selectors, which differ only in the normalization applied to ``X``. It is not
+    used for input-space stratification: forcing parameters are a generator knob,
+    so that design generates one realization per LHS point instead.
+
+    Args:
+        X: ``(M, d)`` pool coordinates already normalized to the unit box.
+        n: Number of points to select.
+        seed: LHS RNG seed.
+        k_pool: Neighbors queried per anchor before the global fallback; defaults
+            to ``min(max(8, n // 4), M)`` (the MOEA-FIND heuristic).
+
+    Returns:
+        Sorted integer array of ``n`` selected row indices into ``X``.
     """
     X = np.asarray(X, dtype=float)
     M, d = X.shape
@@ -254,16 +292,3 @@ def _lhs_nn_select(
             used.add(pick)
             chosen.append(pick)
     return np.sort(np.array(chosen, dtype=int))
-
-
-def support_point_subsample(H: np.ndarray, n: int, *, seed: int) -> np.ndarray:
-    """Energy-distance support points (methods 4.6.1; Mak & Joseph 2018).
-
-    Placeholder for the faithful-x-designed control design (the §4.6.1
-    supplement that isolates uniform-coverage benefits from designed-subsampling
-    benefits). Not part of the hazard-filling selector.
-
-    Raises:
-        NotImplementedError: stub.
-    """
-    raise NotImplementedError("support_points selector not implemented yet")

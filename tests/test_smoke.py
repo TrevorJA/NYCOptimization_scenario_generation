@@ -1,22 +1,19 @@
-"""Smoke tests for the scengen scaffold.
+"""Smoke tests for the scengen package surface.
 
-Covers the parts that are implemented (not stubs): the climate-adjustment transform, the
-calendar->water-year reindex, and the global-index determinism contract. Stubbed functions are
-expected to raise ``NotImplementedError`` and are asserted as such so the scaffold's surface is
-exercised end to end.
+Covers the climate-adjustment transform, the calendar->water-year reindex, the global-index
+determinism contract, and the manifest round-trip.
 """
 
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
-from scengen import diagnostics, forcing_space, hazard_metrics, master_ensemble, subsample
+from scengen import diagnostics, forcing_space, hazard_metrics, forcing_ensemble, subsample
 from scengen.manifest import EnsembleManifest
 
 
 def test_package_imports():
-    for mod in (forcing_space, master_ensemble, hazard_metrics, subsample, diagnostics):
+    for mod in (forcing_space, forcing_ensemble, hazard_metrics, subsample, diagnostics):
         assert mod is not None
 
 
@@ -51,8 +48,8 @@ def test_calendar_to_water_year_reorders():
 def test_child_seed_global_index_invariance():
     """The determinism contract: child k is identical regardless of total N or partitioning."""
     seed = 1234
-    small = master_ensemble.child_seed_sequence(seed, 10)
-    large = master_ensemble.child_seed_sequence(seed, 100)
+    small = forcing_ensemble.child_seed_sequence(seed, 10)
+    large = forcing_ensemble.child_seed_sequence(seed, 100)
     for k in (0, 3, 9):
         np.testing.assert_array_equal(
             small[k].generate_state(8), large[k].generate_state(8)
@@ -75,16 +72,3 @@ def test_manifest_roundtrip(tmp_path):
     back = EnsembleManifest.from_json(path)
     assert back.design == "hazard_filling"
     assert tuple(back.realization_global_indices) == (1, 7, 42)
-
-
-@pytest.mark.parametrize(
-    "call",
-    [
-        # Still-stubbed surfaces (subsample, hazard_metrics, and the coverage
-        # diagnostics are now implemented and covered by their own tests).
-        lambda: subsample.support_point_subsample(np.zeros((10, 3)), 5, seed=0),
-    ],
-)
-def test_stubs_raise(call):
-    with pytest.raises(NotImplementedError):
-        call()

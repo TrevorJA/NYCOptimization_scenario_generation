@@ -16,6 +16,34 @@ def _clustered_hazard_image(M=300, d=3, seed=0):
     return np.vstack([blob, tail])
 
 
+def test_hazard_ess_grid_beats_random_beats_clump():
+    # A uniform grid is the least-redundant arrangement: grid ESS > random ESS > clump ESS,
+    # all at the same N and (default) bandwidth.
+    g = np.linspace(0.05, 0.95, 8)
+    grid = np.stack(np.meshgrid(g, g), axis=-1).reshape(-1, 2)  # 64 points
+    rng = np.random.default_rng(0)
+    rand = rng.uniform(size=(64, 2))
+    clump = 0.5 + 1e-3 * rng.standard_normal((64, 2))
+    ess_grid = dg.hazard_effective_sample_size(grid)["ess"]
+    ess_rand = dg.hazard_effective_sample_size(rand)["ess"]
+    ess_clump = dg.hazard_effective_sample_size(clump)["ess"]
+    assert ess_grid > ess_rand > ess_clump
+    assert ess_clump < 2.0  # tight clump -> ~1 effective point
+
+
+def test_hazard_ess_matched_bandwidth_orders_designs():
+    """At matched (N, d) with a fixed bandwidth, space-filling beats random ESS."""
+    H = _clustered_hazard_image(M=400, d=3, seed=4)
+    X = ss.empirical_cdf_normalize(H)
+    n = 32
+    h = n ** (-1.0 / 3)
+    sel = ss.hazard_filling_subsample(H, n, seed=0)
+    rnd = ss.random_subsample(H, n, seed=0)
+    ess_sel = dg.hazard_effective_sample_size(X[sel], ideal_spacing=h)["ess"]
+    ess_rnd = dg.hazard_effective_sample_size(X[rnd], ideal_spacing=h)["ess"]
+    assert ess_sel > ess_rnd
+
+
 def test_coverage_report_prefers_space_filling_over_random():
     H = _clustered_hazard_image(seed=1)
     n = 24

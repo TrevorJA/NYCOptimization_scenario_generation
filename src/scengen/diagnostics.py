@@ -105,6 +105,62 @@ def mst_mean_edge(X: np.ndarray) -> float:
     return float(nz.mean()) if nz.size else 0.0
 
 
+def hazard_effective_sample_size(
+    X: np.ndarray, *, ideal_spacing: float | None = None, bandwidth_factor: float = 0.33
+) -> dict:
+    """Effective sample size of a point set as a redundancy measure (lower = more clumped).
+
+    Measures how many *effectively distinct* points a design occupies via Gaussian-kernel overlap.
+    For points ``X`` (already normalized to the unit box ``[0, 1]^d``) and a kernel
+    ``K_ij = exp(-||x_i - x_j||^2 / (2 h^2))``::
+
+        ESS = N^2 / sum_ij K_ij
+
+    A perfectly separated design has ``K -> I`` and ``ESS -> N``; a fully clumped design has
+    ``K -> 1`` everywhere and ``ESS -> 1``. The bandwidth defaults to ``bandwidth_factor * N^{-1/d}``
+    -- a fraction of the ideal uniform inter-point spacing, set *below* that spacing so a uniform
+    design scores ``ESS ~ N`` and redundancy shows as ``ESS < N``; the same ``h`` is used for all
+    designs at a given ``(N, d)`` so they are directly comparable. (Note: in higher ``d`` the
+    kernel-overlap ESS is a *weak* discriminator -- non-uniformity shows up far more sharply in
+    L2-star discrepancy; ESS is best read as a corroborating redundancy summary.) Pass
+    ``ideal_spacing`` to fix ``h`` directly across designs of differing ``N``.
+
+    The kernel-matrix participation ratio ``(sum lambda)^2 / sum lambda^2`` is reported as a
+    secondary, spectral view of the same redundancy.
+
+    Args:
+        X: ``(N, d)`` points normalized to the unit box.
+        ideal_spacing: Override bandwidth ``h`` directly; default ``bandwidth_factor * N^{-1/d}``.
+        bandwidth_factor: Fraction of the ideal spacing used for ``h`` when ``ideal_spacing`` is None.
+
+    Returns:
+        Dict with ``ess`` (kernel-overlap ESS), ``ess_fraction`` (``ess / N``), ``participation_ratio``,
+        ``bandwidth``, ``n``, ``dimensions``.
+    """
+    X = np.asarray(X, dtype=float)
+    n, d = X.shape
+    if n < 2:
+        return {
+            "ess": float(n), "ess_fraction": 1.0, "participation_ratio": float(n),
+            "bandwidth": float("nan"), "n": int(n), "dimensions": int(d),
+        }
+    h = float(ideal_spacing) if ideal_spacing is not None else bandwidth_factor * n ** (-1.0 / d)
+    sq = squareform(pdist(X, metric="sqeuclidean"))
+    K = np.exp(-sq / (2.0 * h**2))
+    ess = float(n**2 / K.sum())
+    lam = np.linalg.eigvalsh(K)
+    lam = lam[lam > 0]
+    pr = float(lam.sum() ** 2 / np.square(lam).sum()) if lam.size else float(n)
+    return {
+        "ess": ess,
+        "ess_fraction": ess / n,
+        "participation_ratio": pr,
+        "bandwidth": h,
+        "n": int(n),
+        "dimensions": int(d),
+    }
+
+
 def expected_random_discrepancy(
     n: int,
     m: int,

@@ -1,40 +1,38 @@
 """Hazard-filling design driver (methods 4.6).
 
-Composes the pieces of the hazard-filling scenario ensemble:
+A hazard-filling design owns a **candidate pool** of realizations and selects a
+subset of them. It must select rather than generate: hazard coordinates (drought
+deficit volume, flood peak magnitude, ...) are *emergent* properties of a
+realized flow sequence, so no generator can be asked to produce a realization at
+a prescribed drought severity. The Latin-hypercube anchors of the design are
+therefore snapped to the nearest real pool member (see :mod:`scengen.subsample`).
+Input-space stratification has no such constraint -- forcing parameters are a
+knob on the generator -- and so is a generation design, not a subsample.
 
-    staged master pool  ->  monthly aggregate NYC inflow  ->  hazard image H
-                        ->  LHS+nearest-neighbor subsample  ->  final ensemble HDF5
+The selector is deterministic given its seed: LHS + nearest-neighbor snap. No
+annealing, no discrepancy objective.
 
-The generator emits the **final ensemble** that the optimizer consumes directly:
-the selected realizations are sliced out of the staged master pool, renumbered
-``0..N-1``, and written as a standalone pywrdrb-format ensemble (``gage_flow``
-and ``catchment_inflow`` HDF5s) plus an informational ``_meta.json`` provenance
-sidecar. There is no manifest-as-contract and no per-realization index override
-on the optimizer side -- NYCOptimization resolves the staged ensemble by slug
-like any other.
+Live pipeline::
 
-Flexibility (both expected to change later):
-  - Original ensemble subsampled from: any staged ``kn_{Y}yr_n{N}`` pool (passed
-    in); the initial draft uses stationary Kirsch-Nowak 5-year records.
-  - Hazard metrics: ``metric_names`` selects the axes (default the MOEA-FIND
-    "primary" SSI set, see :mod:`scengen.hazard_metrics`).
+    candidate hazard image (streamed to hazard_image.npz at pool generation)
+        ->  Olden & Poff redundancy screen  ->  tail-balanced axis set
+        ->  LHS + nearest-neighbor selection  ->  selected rows
 
-Pure-array entry point :func:`build_hazard_filling_subset` has no pywrdrb/HDF5
-dependency and is unit-tested directly. :func:`load_ensemble_monthly_aggregate`
-and :func:`stage_subset_ensemble` read/write staged SynHydro ensemble HDF5s.
+:func:`select_from_candidate_image` is the entry point. It takes the precomputed
+candidate hazard image and never touches the pool timeseries, so it scales to a
+very large pool; NYCOptimization materializes the selected realizations on
+demand. This module stays pure numpy/scipy apart from the pandas resample in
+:func:`daily_to_monthly`.
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
 
 from . import diagnostics as dg
-from . import hazard_metrics as hm
 from . import subsample as ss
 
 #: Operational preference order for picking one representative per redundancy
@@ -87,128 +85,49 @@ def daily_to_monthly(daily: pd.Series, agg: str = "mean") -> np.ndarray:
     return monthly.to_numpy(dtype=float)
 
 
-def load_ensemble_monthly_aggregate(
-    catchment_inflow_hdf5: str | Path,
-    nodes: Sequence[str] = hm.DEFAULT_NYC_INFLOW_NODES,
-    *,
-    agg: str = "mean",
-) -> tuple[np.ndarray, list[int]]:
-    """Load a staged ensemble and build the monthly aggregate NYC inflow per realization.
-
-    Args:
-        catchment_inflow_hdf5: Path to a staged ``catchment_inflow_mgd.hdf5``
-            (SynHydro by-node format).
-        nodes: Nodes summed to form the aggregate inflow (default the three NYC
-            reservoir catchments).
-        agg: Daily->monthly aggregation ("mean" MGD or "sum").
-
-    Returns:
-        ``(monthly_matrix, realization_ids)`` where ``monthly_matrix`` is
-        ``(n_realizations, n_months)`` and rows align with ``realization_ids``.
-    """
-    from synhydro.core.ensemble import Ensemble  # lazy: allowed dependency
-
-    ens = Ensemble.from_hdf5(str(catchment_inflow_hdf5), stored_by_node=True)
-    realization_ids = sorted(ens.data_by_realization)
-    rows = []
-    for rid in realization_ids:
-        df = ens.data_by_realization[rid]
-        missing = [n for n in nodes if n not in df.columns]
-        if missing:
-            raise KeyError(f"nodes {missing} not in ensemble columns {list(df.columns)}")
-        agg_daily = df.loc[:, list(nodes)].sum(axis=1)
-        rows.append(daily_to_monthly(agg_daily, agg=agg))
-    n_months = min(len(r) for r in rows)
-    monthly = np.vstack([r[:n_months] for r in rows])
-    return monthly, list(realization_ids)
-
-
-def load_ensemble_daily_aggregate(
-    catchment_inflow_hdf5: str | Path,
-    nodes: Sequence[str] = hm.DEFAULT_NYC_INFLOW_NODES,
-) -> tuple[np.ndarray, list[int]]:
-    """Load a staged ensemble and build the DAILY aggregate NYC inflow per realization.
-
-    Used for the wet (flood) hazard axes, which need daily resolution. Sums the
-    ``nodes`` columns per day (no temporal aggregation).
-
-    Args:
-        catchment_inflow_hdf5: Path to a staged ``catchment_inflow_mgd.hdf5``.
-        nodes: Nodes summed to form the aggregate inflow (default the three NYC
-            reservoir catchments).
-
-    Returns:
-        ``(daily_matrix, realization_ids)`` where ``daily_matrix`` is
-        ``(n_realizations, n_days)`` and rows align with ``realization_ids``.
-    """
-    from synhydro.core.ensemble import Ensemble  # lazy: allowed dependency
-
-    ens = Ensemble.from_hdf5(str(catchment_inflow_hdf5), stored_by_node=True)
-    realization_ids = sorted(ens.data_by_realization)
-    rows = []
-    for rid in realization_ids:
-        df = ens.data_by_realization[rid]
-        missing = [n for n in nodes if n not in df.columns]
-        if missing:
-            raise KeyError(f"nodes {missing} not in ensemble columns {list(df.columns)}")
-        rows.append(df.loc[:, list(nodes)].sum(axis=1).to_numpy(dtype=float))
-    n_days = min(len(r) for r in rows)
-    daily = np.vstack([r[:n_days] for r in rows])
-    return daily, list(realization_ids)
-
-
-def build_hazard_filling_subset(
-    scenario_monthly: np.ndarray,
-    scenario_daily: np.ndarray,
-    reference_monthly: np.ndarray,
-    reference_daily: np.ndarray,
+def select_from_candidate_image(
+    H_candidates: np.ndarray,
+    candidate_axes: Sequence[str],
     n: int,
     *,
     seed: int,
-    dry_timescale: int = 6,
-    flood_threshold_pct: float = 95.0,
     redundancy_threshold: float = 0.7,
     axis_priority: Sequence[str] = DEFAULT_AXIS_PRIORITY,
     max_per_tail: int = 2,
     selector_space: str = "cdf",
-    dist: str = "gamma",
-    reference_start: str = "1945-10-01",
     selector_kwargs: dict | None = None,
 ) -> dict:
-    """Screen the candidate hazard axes per pool, then space-fill-select ``n`` scenarios.
+    """Screen a precomputed candidate hazard image, then space-fill-select ``n`` scenarios.
 
-    Pipeline (methods 3.3 + 4.6): compute the 6-candidate wet+dry event-descriptor
-    hazard image, screen it (Olden & Poff: drop degenerate axes, then keep one
-    operationally-preferred representative per ``|rho_S| >= redundancy_threshold``
-    cluster), and run the LHS+nearest-neighbor selector on the screened sub-image.
-    The axis set is chosen per master pool rather than hard-coded, so it adapts if
-    the generator/pool changes.
+    The single entry point of the hazard-filling design. Given the candidate image ``H_candidates``
+    (``M x n_candidates``) already computed for a candidate pool — streamed at pool generation and
+    reloaded from ``hazard_image.npz`` — it runs the Olden & Poff redundancy screen (drop degenerate
+    axes; keep one operationally-preferred representative per ``|rho_S| >= redundancy_threshold``
+    cluster; cap at ``max_per_tail`` per tail) and then the LHS + nearest-neighbor selector on the
+    screened sub-image. The axis set is screened per pool rather than hard-coded, so it adapts if the
+    generator or pool changes.
+
+    No pool timeseries are read, so this scales to a very large candidate pool; the caller
+    materializes only the selected realizations.
 
     Args:
-        scenario_monthly: ``(M, n_months)`` monthly aggregate NYC inflow.
-        scenario_daily: ``(M, n_days)`` daily aggregate NYC inflow (same scenarios).
-        reference_monthly: 1D historical monthly aggregate inflow (dry SSI fit).
-        reference_daily: 1D historical daily aggregate inflow (POT threshold + mean).
+        H_candidates: ``(M, n_candidates)`` candidate hazard image (raw metric values).
+        candidate_axes: Length-``n_candidates`` axis names (columns of ``H_candidates``).
         n: Number of scenarios to select.
         seed: Selector (LHS) RNG seed.
-        dry_timescale: Drought SSI accumulation in months (SSI-6 default).
-        flood_threshold_pct: POT high-flow threshold percentile (95 = Q5).
-        redundancy_threshold: Spearman |rho| cut for the redundancy clustering.
+        redundancy_threshold: Spearman ``|rho|`` cut for the redundancy clustering.
         axis_priority: Operational preference order for cluster representatives.
-        dist, reference_start: SSI configuration.
-        selector_kwargs: Extra kwargs for ``hazard_filling_subsample``.
+        max_per_tail: Maximum retained axes per hazard tail (dry / wet).
+        selector_space: ``"cdf"`` (faithful, rank space) or ``"abs"`` (distorted, magnitude space).
+        selector_kwargs: Extra kwargs forwarded to the selector (e.g. ``k_pool``).
 
     Returns:
-        Dict with ``selected_rows`` (sorted indices), ``chosen_axes`` (the
-        screened axis set used for selection), ``candidate_axes`` (all 6),
-        ``H_candidates`` (M x 6), ``screen`` (spread + clusters), and ``coverage``
-        (selected vs random L2-star on the chosen sub-image).
+        Dict with ``selected_rows`` (sorted indices), ``chosen_axes`` (the screened axis set used for
+        selection), ``candidate_axes``, ``H_candidates``, ``screen`` (spread + clusters), and
+        ``coverage`` (selected vs random L2-star on the chosen sub-image).
     """
-    H_full, candidate_axes = hm.compute_candidate_hazard_image(
-        scenario_monthly, scenario_daily, reference_monthly, reference_daily,
-        dry_timescale=dry_timescale, flood_threshold_pct=flood_threshold_pct,
-        dist=dist, reference_start=reference_start,
-    )
+    H_full = np.asarray(H_candidates, dtype=float)
+    candidate_axes = list(candidate_axes)
 
     # Olden & Poff screen: drop degenerate axes, keep one representative per cluster.
     spread = dg.per_metric_spread(H_full, candidate_axes)
@@ -224,9 +143,8 @@ def build_hazard_filling_subset(
     chosen_idx = [candidate_axes.index(a) for a in chosen_axes]
     H_sel = H_full[:, chosen_idx]
 
-    # Selection space: "cdf" (faithful, rank space) or "abs" (distorted, absolute
-    # magnitude space). Coverage QC is always reported in CDF/rank space so the
-    # two arms are comparable on the same discrepancy scale.
+    # Selection space: "cdf" (faithful, rank space) or "abs" (distorted, absolute magnitude space).
+    # Coverage QC is always reported in CDF/rank space so the two arms share a discrepancy scale.
     if selector_space == "cdf":
         sel = ss.hazard_filling_subsample(H_sel, n, seed=seed, **(selector_kwargs or {}))
     elif selector_space == "abs":
@@ -245,62 +163,6 @@ def build_hazard_filling_subset(
         "chosen_axes": chosen_axes,
         "candidate_axes": candidate_axes,
         "H_candidates": H_full,
-        "screen": {
-            "spread": spread,
-            "clusters": clusters["clusters"],
-            "representatives": chosen_axes,
-        },
+        "screen": {"spread": spread, "clusters": clusters["clusters"], "representatives": chosen_axes},
         "coverage": coverage,
     }
-
-
-def stage_subset_ensemble(
-    pool_dir: str | Path,
-    out_dir: str | Path,
-    selected_source_ids: Sequence[int],
-    *,
-    meta: dict,
-    files: Sequence[str] = ("gage_flow_mgd.hdf5", "catchment_inflow_mgd.hdf5"),
-) -> Path:
-    """Write the final hazard-filling ensemble by slicing the master pool.
-
-    Reads each pywrdrb-format HDF5 in ``pool_dir``, keeps only the
-    ``selected_source_ids`` realizations, renumbers them ``0..N-1``, and writes
-    the reduced ensemble to ``out_dir`` together with an informational
-    ``_meta.json`` provenance sidecar. The reduced HDF5s are what the optimizer
-    loads directly (resolved by slug); the manifest/index-override path is gone.
-
-    Args:
-        pool_dir: Staged master-pool directory (holds the ``files`` HDF5s).
-        out_dir: Destination directory for the final ensemble (created if absent).
-        selected_source_ids: Pool realization ids to keep (the from_hdf5 enumerate
-            keys, i.e. the ``realization_ids`` returned by
-            :func:`load_ensemble_monthly_aggregate`). Output realizations are
-            renumbered ``0..N-1`` in this order.
-        meta: Provenance dict written verbatim to ``_meta.json``. Must carry at
-            least ``n_realizations`` and ``realization_years`` (NYCOptimization
-            resolves the staged ensemble from these).
-        files: HDF5 basenames to slice (default the pywrdrb gage + catchment pair).
-
-    Returns:
-        The ``out_dir`` path.
-    """
-    from synhydro.core.ensemble import Ensemble  # lazy: allowed dependency
-
-    pool_dir, out_dir = Path(pool_dir), Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    src_ids = [int(s) for s in selected_source_ids]
-
-    for fname in files:
-        src_path = pool_dir / fname
-        if not src_path.exists():
-            raise FileNotFoundError(f"pool file missing: {src_path}")
-        pool = Ensemble.from_hdf5(str(src_path), stored_by_node=True).data_by_realization
-        missing = [s for s in src_ids if s not in pool]
-        if missing:
-            raise KeyError(f"selected ids {missing} not in pool {src_path.name}")
-        reduced = {new_id: pool[s] for new_id, s in enumerate(src_ids)}
-        Ensemble(reduced).to_hdf5(str(out_dir / fname))
-
-    (out_dir / "_meta.json").write_text(json.dumps(meta, indent=2, sort_keys=True))
-    return out_dir
