@@ -1,6 +1,7 @@
-"""Hazard-space subsampling selectors (methods 4.6, 4.2).
+"""Hazard-space subsampling selectors.
 
-Selects ``n`` realizations from a candidate pool's hazard image ``H``.
+Selects ``n`` realizations from a candidate pool's hazard image ``H``. The
+specification is ``scenario_design_methods.md`` (§4.3 selector, §6 diagnostics).
 
 **Why these selectors SELECT rather than GENERATE.** Hazard coordinates (drought
 deficit volume, flood peak magnitude, ...) are *emergent* properties of a
@@ -20,19 +21,27 @@ in this module.
 
 Selectors here:
 
-  - ``hazard_filling_subsample`` (methods 4.6): the contribution. LHS +
-    nearest-neighbor space-filling selection over the empirical-CDF-normalized
-    hazard image, so "uniform in hazard space" is well-defined under skewed
-    marginals (the faithful / rank-space arm).
-  - ``absolute_filling_subsample``: the same selector in absolute (min-max)
-    magnitude space -- a retained non-campaign sensitivity, not a campaign arm.
-  - ``random_subsample`` (methods 4.2): the random-without-replacement baseline
-    that the coverage-vs-random QC gate compares against.
+  - ``absolute_filling_subsample``: the CAMPAIGN selector of the hazard-filling
+    design. LHS + nearest-neighbor space-filling selection over the ABSOLUTE
+    (min-max range-scaled) hazard image, so filling is uniform over each axis's
+    *magnitude* range. Because the pool's hazard marginals are strongly
+    right-skewed, this draws selected members from the sparse severe corners far
+    more often than their pool frequency: severe drought and flood conditions are
+    over-represented relative to their probability under the generator. That is
+    the deliberate distribution shift the study tests, not a defect.
+  - ``cdf_filling_subsample``: the same selector over the
+    empirical-CDF-normalized (rank) hazard image. Filling uniformly in rank
+    reproduces the pool's marginal frequencies and distorts only the joint
+    dependence among axes. Retained as a NON-CAMPAIGN sensitivity that isolates
+    how much of any hazard-filling effect is attributable to absolute-space tail
+    over-representation specifically.
+  - ``random_subsample``: the random-without-replacement baseline that the
+    coverage QC compares against.
 
 The selector is deterministic given its seed: an LHS plan projected onto the
 pool by nearest neighbor. There is no discrepancy objective, no annealing, and
-no tuning -- so L2-star discrepancy stays an *independent* build-QC gate
-(methods 6a) rather than the quantity the selector optimized.
+no tuning -- so L2-star discrepancy stays an *independent* build-QC diagnostic
+rather than the quantity the selector optimized.
 
 ``coverage_metrics``, ``generate_lhs_samples``, and the LHS+NN selection
 algorithm are COPIED (not imported) from MOEA-FIND ``src/discovery/analysis.py``
@@ -93,11 +102,12 @@ def generate_lhs_samples(
 def empirical_cdf_normalize(H: np.ndarray) -> np.ndarray:
     """Map each hazard axis to (0, 1] by its empirical CDF (average ranks).
 
-    Makes "uniform in hazard space" well-defined under skewed marginals: after
-    this transform every axis is (approximately) uniform on the unit interval,
-    so a Latin hypercube over the unit box fills the hazard manifold evenly.
-    Uniform-in-rank selection is quantile stratification: marginally
-    *representative* of the pool (the faithful arm).
+    After this transform every axis is (approximately) uniform on the unit
+    interval, so a Latin hypercube over the unit box fills the *rank* image of
+    the hazard manifold evenly. Uniform-in-rank selection is quantile
+    stratification: it reproduces the pool's marginal frequencies and distorts
+    only the joint dependence among axes. This is the geometry of the
+    non-campaign sensitivity, not of the campaign selector.
 
     Args:
         H: ``(M, d)`` hazard image.
@@ -113,34 +123,73 @@ def empirical_cdf_normalize(H: np.ndarray) -> np.ndarray:
     return out
 
 
-def minmax_normalize(
-    H: np.ndarray, *, lo_pct: float = 0.0, hi_pct: float = 100.0
-) -> np.ndarray:
-    """Map each hazard axis to [0, 1] by its ABSOLUTE range (optionally robust).
+#: Campaign robust percentile bounds for the absolute-space normalization.
+#: The bounds must be CENTRAL order statistics, not sample extremes: the sample
+#: min/max of a right-skewed hazard metric are non-convergent extreme order
+#: statistics, so a full-range box would (i) depend on the pool size P (a bigger
+#: pool widens the range and strengthens the tail distortion, entangling the
+#: intervention's strength with a nuisance sizing parameter), (ii) differ
+#: materially across the K pool re-rolls (breaking draw commensurability), and
+#: (iii) let a single outlier compress the bulk of the pool into a corner of the
+#: box. The p1/p99 quantiles are root-P-consistent, so the box converges to a
+#: fixed population functional. On the zero-inflated dry event axes p1 collapses
+#: to the natural zero automatically. Members outside the bounds clip to the box
+#: faces (a bounded, <= 1% + 1% atom per axis, reported as build-QC) and remain
+#: selectable there.
+ROBUST_LO_PCT: float = 1.0
+ROBUST_HI_PCT: float = 99.0
 
-    Unlike :func:`empirical_cdf_normalize`, this preserves the metric's absolute
-    spacing, so a Latin hypercube over the unit box targets uniform coverage of
-    the *magnitude* range. Uniform-in-magnitude selection over a skewed pool
-    over-represents the sparse tails relative to their frequency (the distorted
-    arm). ``lo_pct``/``hi_pct`` set robust percentile bounds so a few outliers do
-    not dominate the range (``0``/``100`` = full range; ``1``/``99`` = robust).
+
+def robust_range_bounds(
+    H: np.ndarray, *, lo_pct: float = ROBUST_LO_PCT, hi_pct: float = ROBUST_HI_PCT
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-axis robust range bounds ``(lo, hi)`` for the absolute normalization.
+
+    Single source of the bounds used by :func:`minmax_normalize`, the coverage
+    QC, and the normalization build-QC, so all three always agree.
 
     Args:
         H: ``(M, d)`` hazard image.
-        lo_pct, hi_pct: Per-axis lower/upper percentile bounds for the range.
+        lo_pct, hi_pct: Percentile bounds (campaign default p1/p99; see
+            :data:`ROBUST_LO_PCT`).
 
     Returns:
-        ``(M, d)`` array with each column min-max scaled and clipped to [0, 1].
+        Two length-``d`` arrays ``(lo, hi)`` with ``hi > lo`` guaranteed.
     """
     H = np.asarray(H, dtype=float)
-    out = np.empty_like(H)
-    for a in range(H.shape[1]):
-        lo = np.percentile(H[:, a], lo_pct)
-        hi = np.percentile(H[:, a], hi_pct)
-        if hi <= lo:
-            hi = lo + 1e-12
-        out[:, a] = np.clip((H[:, a] - lo) / (hi - lo), 0.0, 1.0)
-    return out
+    lo = np.percentile(H, lo_pct, axis=0)
+    hi = np.percentile(H, hi_pct, axis=0)
+    hi = np.where(hi <= lo, lo + 1e-12, hi)
+    return lo, hi
+
+
+def minmax_normalize(
+    H: np.ndarray, *, lo_pct: float = ROBUST_LO_PCT, hi_pct: float = ROBUST_HI_PCT
+) -> np.ndarray:
+    """Map each hazard axis to [0, 1] by its robust ABSOLUTE range.
+
+    Unlike :func:`empirical_cdf_normalize`, this preserves the metric's absolute
+    spacing, so a Latin hypercube over the unit box targets uniform coverage of
+    the *magnitude* range and no single axis dominates the distance while spacing
+    within an axis stays proportional to physical magnitude. Uniform-in-magnitude
+    selection over a skewed pool over-represents the sparse tails relative to
+    their frequency -- the deliberate distribution shift the study tests. This is
+    the geometry of the CAMPAIGN selector.
+
+    Bounds default to the robust campaign percentiles (p1/p99; rationale at
+    :data:`ROBUST_LO_PCT`). Pass ``lo_pct=0, hi_pct=100`` for the full-range
+    variant, retained only as a sensitivity.
+
+    Args:
+        H: ``(M, d)`` hazard image.
+        lo_pct, hi_pct: Per-axis percentile bounds for the range.
+
+    Returns:
+        ``(M, d)`` array with each column scaled and clipped to [0, 1].
+    """
+    H = np.asarray(H, dtype=float)
+    lo, hi = robust_range_bounds(H, lo_pct=lo_pct, hi_pct=hi_pct)
+    return np.clip((H - lo) / (hi - lo), 0.0, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +197,7 @@ def minmax_normalize(
 # ---------------------------------------------------------------------------
 
 def random_subsample(H: np.ndarray, n: int, *, seed: int) -> np.ndarray:
-    """Random-without-replacement subsample of ``n`` row indices (methods 4.2)."""
+    """Random-without-replacement subsample of ``n`` row indices."""
     M = len(H)
     if n > M:
         raise ValueError(f"requested {n} but only {M} available")
@@ -156,21 +205,26 @@ def random_subsample(H: np.ndarray, n: int, *, seed: int) -> np.ndarray:
     return np.sort(rng.choice(M, size=n, replace=False))
 
 
-def hazard_filling_subsample(
+def absolute_filling_subsample(
     H: np.ndarray,
     n: int,
     *,
     seed: int,
+    lo_pct: float = ROBUST_LO_PCT,
+    hi_pct: float = ROBUST_HI_PCT,
     k_pool: int | None = None,
 ) -> np.ndarray:
-    """LHS + nearest-neighbor space-filling subsample over the hazard manifold (methods 4.6).
+    """LHS + nearest-neighbor subsample in ABSOLUTE (robust min-max) hazard space.
 
-    Algorithm (``pick_space_filling_subset``, copied from MOEA-FIND
+    The CAMPAIGN selector of the hazard-filling design. Algorithm
+    (``pick_space_filling_subset``, copied from MOEA-FIND
     ``src/discovery/analysis.py`` and applied in normalized hazard space):
 
-        1. Normalize ``H`` per axis to (0, 1] by its empirical CDF, so each axis
-           is uniform and a Latin hypercube over the unit box targets uniform
-           coverage of the hazard manifold.
+        1. Scale ``H`` per axis to [0, 1] by its robust pool range (p1/p99
+           campaign default; rationale at :data:`ROBUST_LO_PCT`), so distances
+           are in absolute, range-scaled magnitude units and the box is a stable
+           functional of the population rather than of the pool's sample
+           extremes.
         2. Draw ``n`` Latin-hypercube anchors over the unit box.
         3. Snap each anchor to the nearest scenario not already chosen (KDTree
            query over the candidate pool; global fallback if the local pool is
@@ -179,49 +233,25 @@ def hazard_filling_subsample(
            the design can only select an existing pool member near the anchor,
            never generate a realization at the anchor.
 
+    Filling the *range* uniformly over a right-skewed pool over-represents the
+    sparse severe corners relative to their pool frequency -- the deliberate
+    distribution shift the study tests. The full-range variant
+    (``lo_pct=0, hi_pct=100``) is retained only as a sensitivity: it lets a
+    single outlier compress the bulk of the pool and ties the box to the pool
+    size P.
+
     The result is the deterministic-given-seed nearest-neighbor projection of an
     LHS plan; no discrepancy objective is optimized, so L2-star discrepancy
-    remains an independent build-QC gate (methods 6a).
+    remains an independent build-QC diagnostic.
 
     Args:
         H: ``(M, d)`` hazard image (raw metric values; normalized internally).
         n: Subsample size.
         seed: LHS RNG seed (replicate the design over seeds).
+        lo_pct, hi_pct: Percentile bounds for the absolute range (campaign
+            default p1/p99).
         k_pool: Neighbors queried per anchor before the global fallback; defaults
             to ``min(max(8, n // 4), M)`` (the MOEA-FIND heuristic).
-
-    Returns:
-        Sorted integer array of ``n`` selected row indices into ``H``.
-    """
-    return _lhs_nn_select(empirical_cdf_normalize(H), n, seed=seed, k_pool=k_pool)
-
-
-def absolute_filling_subsample(
-    H: np.ndarray,
-    n: int,
-    *,
-    seed: int,
-    lo_pct: float = 0.0,
-    hi_pct: float = 100.0,
-    k_pool: int | None = None,
-) -> np.ndarray:
-    """LHS + nearest-neighbor subsample in ABSOLUTE (min-max) hazard space.
-
-    The distorted counterpart to :func:`hazard_filling_subsample`, retained as a
-    non-campaign sensitivity: filling is uniform over each axis's *magnitude*
-    range rather than its rank, so the selected subset over-represents the sparse
-    tails relative to their frequency (genuine probability distortion toward
-    extreme-hazard coverage). Over a heavy-tailed pool the full-range version can
-    fixate on a few outliers; pass ``lo_pct``/``hi_pct`` (e.g. 1/99) for robust
-    bounds. Same LHS + nearest-neighbor snap, same emergent-coordinate rationale
-    -- only the normalization of the hazard image differs.
-
-    Args:
-        H: ``(M, d)`` hazard image (raw metric values; normalized internally).
-        n: Subsample size.
-        seed: LHS RNG seed.
-        lo_pct, hi_pct: Robust percentile bounds for the absolute range.
-        k_pool: Neighbors queried per anchor before the global fallback.
 
     Returns:
         Sorted integer array of ``n`` selected row indices into ``H``.
@@ -229,6 +259,36 @@ def absolute_filling_subsample(
     return _lhs_nn_select(
         minmax_normalize(H, lo_pct=lo_pct, hi_pct=hi_pct), n, seed=seed, k_pool=k_pool
     )
+
+
+def cdf_filling_subsample(
+    H: np.ndarray,
+    n: int,
+    *,
+    seed: int,
+    k_pool: int | None = None,
+) -> np.ndarray:
+    """LHS + nearest-neighbor subsample in empirical-CDF (rank) hazard space.
+
+    The retained NON-CAMPAIGN sensitivity, not the campaign selector. It differs
+    from :func:`absolute_filling_subsample` only in the normalization of the
+    hazard image: each axis is mapped to (0, 1] by its empirical CDF, so filling
+    is uniform in *rank* rather than in magnitude. That reproduces the pool's
+    marginal frequencies and distorts only the joint dependence among axes, which
+    is exactly what makes it the sensitivity that isolates how much of any
+    hazard-filling effect comes from absolute-space tail over-representation.
+    Same LHS + nearest-neighbor snap, same emergent-coordinate rationale.
+
+    Args:
+        H: ``(M, d)`` hazard image (raw metric values; normalized internally).
+        n: Subsample size.
+        seed: LHS RNG seed.
+        k_pool: Neighbors queried per anchor before the global fallback.
+
+    Returns:
+        Sorted integer array of ``n`` selected row indices into ``H``.
+    """
+    return _lhs_nn_select(empirical_cdf_normalize(H), n, seed=seed, k_pool=k_pool)
 
 
 def _lhs_nn_select(
@@ -242,10 +302,11 @@ def _lhs_nn_select(
     what makes this a *selection* rather than a *generation* design -- see the
     module docstring on why hazard coordinates cannot be generated to.
 
-    Shared by the rank-space (faithful) and absolute-space (distorted) hazard
-    selectors, which differ only in the normalization applied to ``X``. It is not
-    used for input-space stratification: forcing parameters are a generator knob,
-    so that design generates one realization per LHS point instead.
+    Shared by the absolute-space (campaign) and rank-space (non-campaign
+    sensitivity) hazard selectors, which differ only in the normalization applied
+    to ``X``. It is not used for input-space stratification: forcing parameters
+    are a generator knob, so that design generates one realization per LHS point
+    instead.
 
     Args:
         X: ``(M, d)`` pool coordinates already normalized to the unit box.

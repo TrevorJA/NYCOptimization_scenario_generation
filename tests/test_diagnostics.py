@@ -37,7 +37,7 @@ def test_hazard_ess_matched_bandwidth_orders_designs():
     X = ss.empirical_cdf_normalize(H)
     n = 32
     h = n ** (-1.0 / 3)
-    sel = ss.hazard_filling_subsample(H, n, seed=0)
+    sel = ss.cdf_filling_subsample(H, n, seed=0)
     rnd = ss.random_subsample(H, n, seed=0)
     ess_sel = dg.hazard_effective_sample_size(X[sel], ideal_spacing=h)["ess"]
     ess_rnd = dg.hazard_effective_sample_size(X[rnd], ideal_spacing=h)["ess"]
@@ -47,7 +47,7 @@ def test_hazard_ess_matched_bandwidth_orders_designs():
 def test_coverage_report_prefers_space_filling_over_random():
     H = _clustered_hazard_image(seed=1)
     n = 24
-    sel = ss.hazard_filling_subsample(H, n, seed=0)
+    sel = ss.cdf_filling_subsample(H, n, seed=0)
     rnd = ss.random_subsample(H, n, seed=0)
 
     rep_sel = dg.coverage_report(H, sel, n_boot=200, seed=0)
@@ -62,7 +62,7 @@ def test_coverage_report_prefers_space_filling_over_random():
 
 def test_marginal_gaps_shape_and_bounds():
     H = _clustered_hazard_image()
-    sel = ss.hazard_filling_subsample(H, 20, seed=2)
+    sel = ss.cdf_filling_subsample(H, 20, seed=2)
     gaps = dg.marginal_gaps(H, sel)
     assert gaps.shape == (3,)
     assert np.all(gaps > 0) and np.all(gaps <= 1.0)
@@ -80,7 +80,7 @@ def test_redundancy_screen_flags_correlated_axes():
 
 def test_save_load_hazard_image_roundtrip(tmp_path):
     H = _clustered_hazard_image(M=50, d=3)
-    sel = ss.hazard_filling_subsample(H, 8, seed=0)
+    sel = ss.cdf_filling_subsample(H, 8, seed=0)
     path = dg.save_hazard_image(
         tmp_path / "hazard_image.npz",
         H=H, hazard_axes=["a", "b", "c"],

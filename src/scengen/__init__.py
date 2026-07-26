@@ -9,13 +9,15 @@ Public surface:
                        Input-space stratification GENERATES one realization per LHS design point:
                        theta is a knob on the generator, so there is nothing to subsample.
     forcing_ensemble - Kirsch-Nowak ensemble / candidate pool + optional hazard image (methods 3.2)
-    hazard_metrics   - reuse + re-screen MOEA-FIND hazard metrics (methods 3.3)
-    subsample        - hazard-space LHS + nearest-neighbor selectors (methods 4.6, 4.2). Hazard
+    hazard_metrics   - 8-axis candidate event-descriptor hazard image (methods 3.3)
+    subsample        - hazard-space LHS + nearest-neighbor selectors (methods 4.3). Hazard
                        coordinates are EMERGENT from a realized sequence, so a hazard design must
                        SELECT FROM a candidate pool and snap its LHS anchors to the nearest member.
+                       Absolute (range-scaled) space is the campaign selector; rank space is the
+                       retained non-campaign sensitivity.
     hazard_filling   - hazard-filling design driver: screen + select on a candidate hazard image
     seeds            - namespaced generator seeds (cross-design disjointness contract)
-    diagnostics      - ensemble-quality / build-QC diagnostics (methods 6a)
+    diagnostics      - ensemble-quality / build-QC diagnostics (methods 6)
     manifest         - provenance manifest emitted with each staged ensemble (handoff contract)
 """
 

@@ -1,13 +1,14 @@
-"""compare_sampling_spaces.py - characterize the absolute (distorted) vs CDF
-(faithful) hazard-filling selection schemes, offline, on a staged hazard image.
+"""compare_sampling_spaces.py - characterize the absolute (campaign) vs CDF
+(non-campaign sensitivity) hazard-filling selection schemes, offline, on a
+staged hazard image.
 
 Loads the candidate hazard image written beside a staged hazard-filling ensemble
 (``hazard_image.npz``), subsets to the chosen axes, and runs three selectors at
 the same N and seed:
 
-    cdf            - LHS+NN in empirical-CDF (rank) space  [faithful / representative]
-    absolute       - LHS+NN in absolute min-max space      [distorted / extreme-weighted]
-    absolute_p1_99 - absolute with robust 1/99-pct bounds   [distorted, outlier-robust]
+    absolute      - LHS+NN in absolute robust (p1/p99) space  [CAMPAIGN selector]
+    absolute_full - absolute with full-range (0/100) bounds   [sensitivity: outlier fixation]
+    cdf           - LHS+NN in empirical-CDF (rank) space      [non-campaign sensitivity]
 
 It reports, per scheme: marginal fidelity to the pool (KS distance, upper-tail
 share, median), separation/degeneracy (nearest-neighbor stats, extreme-corner
@@ -15,8 +16,9 @@ concentration), and coverage cross-reported in BOTH spaces (each scheme wins in
 its own space; the cross term shows the trade). Figures: per-axis marginal
 density overlays and a 2-D magnitude-axis scatter.
 
-This is a decision aid for whether to include the absolute (distorted) design as
-a separate experimental arm. Pure numpy/scipy + the staged npz; no pywrdrb.
+This quantifies how strongly the campaign selector over-represents the severe
+tails relative to the rank-space sensitivity. Pure numpy/scipy + the staged npz;
+no pywrdrb.
 
 Usage::
 
@@ -41,16 +43,16 @@ from scengen import diagnostics as dg  # noqa: E402
 from scengen import subsample as ss  # noqa: E402
 
 _DEFAULT = "../NYCOptimization/outputs/synthetic_ensembles/hazfill_5yr_n64_s0"
-_SCHEME_COLORS = {"cdf": "#1f6fb4", "absolute": "#c1272d", "absolute_p1_99": "#e8920c"}
+_SCHEME_COLORS = {"cdf": "#1f6fb4", "absolute": "#c1272d", "absolute_full": "#e8920c"}
 
 
 def _selectors(n, seed):
     return {
-        "cdf": lambda H: ss.hazard_filling_subsample(H, n, seed=seed),
         "absolute": lambda H: ss.absolute_filling_subsample(H, n, seed=seed),
-        "absolute_p1_99": lambda H: ss.absolute_filling_subsample(
-            H, n, seed=seed, lo_pct=1.0, hi_pct=99.0
+        "absolute_full": lambda H: ss.absolute_filling_subsample(
+            H, n, seed=seed, lo_pct=0.0, hi_pct=100.0
         ),
+        "cdf": lambda H: ss.cdf_filling_subsample(H, n, seed=seed),
     }
 
 
@@ -62,7 +64,13 @@ def _mean_abs_spearman(A, m):
 
 
 def characterize(H, sel, axes):
-    """Per-scheme diagnostics for a selection (absolute-space view + coverage)."""
+    """Per-scheme diagnostics for a selection (absolute-space view + coverage).
+
+    ``mean_tail_share_p90`` is the headline: ~0.10 means the selection reproduces
+    the pool's upper-decile frequency (what rank-space filling does), while a
+    materially higher value is the deliberate tail over-representation of the
+    campaign (absolute-space) selector.
+    """
     M, m = H.shape
     Xcdf = ss.empirical_cdf_normalize(H)
     Xabs = ss.minmax_normalize(H)
@@ -110,7 +118,7 @@ def plot_marginals(H, sels, axes, out_path: Path) -> None:
             axx.legend(fontsize=7)
     for k in range(m, nrow * ncol):
         ax[k // ncol][k % ncol].axis("off")
-    fig.suptitle("Per-axis marginals: pool vs CDF (faithful) vs absolute (distorted)", fontsize=11)
+    fig.suptitle("Per-axis marginals: pool vs absolute (campaign) vs CDF (sensitivity)", fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_path, dpi=150)
     plt.close(fig)

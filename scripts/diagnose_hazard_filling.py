@@ -3,7 +3,7 @@ hazard-filling ensemble.
 
 Reads the ``hazard_image.npz`` that the NYCOptimization subsample step writes
 beside a staged hazard-filling ensemble (the pool hazard image + the selected
-rows), computes the coverage / build-QC diagnostics (methods 6a), and renders a
+rows), computes the coverage / build-QC diagnostics (methods 6), and renders a
 small set of exploratory figures:
 
     1. hazard-space pair grid   - pool vs selected, normalized hazard space
@@ -64,10 +64,10 @@ def _diag_density(ax, pool_vals, sel_vals, value_range, *, bins: int = 22) -> No
 
     Both are drawn as density-normalized (area=1) distributions on the same
     axis so they are directly comparable: pool as a filled grey histogram,
-    selected as a red step outline. No per-point rug lines. If the two curves
-    coincide, the selected marginal reproduces the pool marginal (the
-    quantile-stratification / marginal-representativeness property); divergence
-    reveals genuine marginal distortion.
+    selected as a red step outline. No per-point rug lines. Coinciding curves
+    mean the selected marginal reproduces the pool marginal (what rank-space
+    filling gives); divergence into the upper tail is the deliberate
+    over-representation the campaign selector administers.
     """
     ax.hist(pool_vals, bins=bins, range=value_range, density=True,
             color=_POOL_COLOR, label="pool")
@@ -109,8 +109,9 @@ def plot_hazard_pair_grid_raw(H, sel, axes, out_path: Path) -> None:
 
     Unlike :func:`plot_hazard_pair_grid` (which works in empirical-CDF rank
     space), this shows the raw, skewed metric distributions and where the
-    selected subset lands in real units -- exposing the over-representation of
-    the rare tails that uniform-in-rank filling produces.
+    selected subset lands in real units -- the view in which the campaign
+    (absolute-space) selector's over-representation of the rare severe corners
+    is visible.
     """
     H = np.asarray(H, dtype=float)
     m = H.shape[1]
@@ -204,7 +205,7 @@ def main() -> None:
     if not img_path.exists():
         raise SystemExit(
             f"hazard_image.npz not found in {args.ensemble_dir}. Run the "
-            f"NYCOptimization subsample step (scripts/main/subsample_hazard_filling.py)."
+            f"NYCOptimization selection step (scripts/main/select_hazard_filling.py)."
         )
     img = dg.load_hazard_image(img_path)
     sel = img["selected_rows"]

@@ -33,7 +33,7 @@ discrepancy objective, which is what keeps L2-star discrepancy an *independent* 
 |---|---|
 | `forcing_space` — CMIP6 envelope + LHS/i.i.d. fill -> `theta` (the generate-to design) | `EnsembleSpec` / `ScenarioDesign` registry + `resolve_search_spec` dispatch |
 | `forcing_ensemble` — Kirsch–Nowak generation, streaming hazard image | slug grammar + `register_ensemble_path` (the contract) |
-| `hazard_metrics` — reuse + re-screen MOEA-FIND metrics | `ensemble_prep` staging into pywrdrb preprocessors |
+| `hazard_metrics` — 8-axis candidate event-descriptor hazard image | `ensemble_prep` staging into pywrdrb preprocessors |
 | `subsample` / `hazard_filling` — hazard-space LHS + nearest-neighbor selector (the select-from design) | staging of the selected realizations + in-loop re-index hook |
 | `diagnostics` — coverage / redundancy / fidelity (§6a) | outcome diagnostics (§6b: overfitting gap, stability) |
 | `manifest` — provenance manifest emitted with each staged ensemble | consumption of staged ensembles by slug |
@@ -59,9 +59,10 @@ versioned/hashed stage over a manual copy (avoids provenance drift).
 ## Status
 
 **Hazard-filling is implemented and tested:** `subsample.py` (LHS + nearest-neighbor selector, in
-rank space and — as a retained non-campaign sensitivity — absolute magnitude space, plus the copied
-coverage/LHS primitives and the random baseline), `hazard_metrics.py` (copied MOEA-FIND event
-descriptors; SynHydro provides SSI), and `hazard_filling.py` (driver:
+absolute range-scaled magnitude space — the campaign selector — and, as a retained non-campaign
+sensitivity, empirical-CDF/rank space, plus the copied coverage/LHS primitives and the random
+baseline), `hazard_metrics.py` (8-axis candidate event descriptors: SSI-6 controlling-event run
+theory + daily POT flood pulses; SynHydro provides SSI), and `hazard_filling.py` (driver:
 `select_from_candidate_image` — Olden & Poff redundancy screen → tail-balanced axis set → selection,
 operating on the streamed candidate hazard image, never on the pool timeseries). Run `pytest` for
 the selector tests (pure numpy/scipy); the SSI-dependent tests require SynHydro and are skipped

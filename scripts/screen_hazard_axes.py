@@ -1,8 +1,9 @@
 """screen_hazard_axes.py - choose a low-redundancy wet+dry hazard-axis set.
 
 Reads the candidate hazard image streamed at candidate-pool generation
-(``hazard_image.npz``; 3+ drought and 3+ flood run-theory event descriptors, see
-:mod:`scengen.hazard_metrics`) and runs the Olden & Poff (2003) screening
+(``hazard_image.npz``; the 8-axis candidate set — 5 dry SSI-6 controlling-event
+run-theory axes + 3 wet POT axes, see :mod:`scengen.hazard_metrics`) and runs
+the Olden & Poff (2003) screening
 pipeline to recommend a parsimonious, low-redundancy axis set spanning both
 tails:
 
