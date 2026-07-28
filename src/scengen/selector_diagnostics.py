@@ -268,6 +268,136 @@ def selection_metrics(
     return out
 
 
+def per_axis_selection_metrics(
+    H: np.ndarray,
+    rows: np.ndarray,
+    axes: Sequence[str],
+    *,
+    lo_pct: float = ss.ROBUST_LO_PCT,
+    hi_pct: float = ss.ROBUST_HI_PCT,
+) -> dict[str, dict[str, float]]:
+    """Per-axis marginal coverage + tail enrichment of one selected set.
+
+    The mechanism metric of the design: LHS anchors stratify EVERY axis into N
+    bins regardless of dimension, so the coverage guarantee is per-axis marginal
+    (not joint). This measures, per axis in the campaign scaled coordinates:
+    the KS distance of the selected marginal to uniform on [0, 1], the 1-D
+    L2-star discrepancy, the largest marginal gap, and the tail share above the
+    pool P90 (unbiased rule ≈ 0.10).
+
+    Args:
+        H: ``(M, d)`` pool sub-image on the chosen axes (raw metric values).
+        rows: Selected row indices.
+        axes: Axis names (columns of ``H``).
+        lo_pct, hi_pct: Robust bounds of the abs geometry.
+
+    Returns:
+        ``{axis: {ks_to_uniform, star_1d, max_gap, tail_share_p90}}``.
+    """
+    from scipy.stats.qmc import discrepancy
+
+    H = np.asarray(H, dtype=float)
+    rows = np.asarray(rows, dtype=int)
+    X = ss.minmax_normalize(H, lo_pct=lo_pct, hi_pct=hi_pct)
+    p90 = np.percentile(H, 90, axis=0)
+
+    out: dict[str, dict[str, float]] = {}
+    for k, name in enumerate(axes):
+        x = np.sort(X[rows, k])
+        n = len(x)
+        up = np.arange(1, n + 1) / n
+        lo = np.arange(0, n) / n
+        ks = float(max(np.max(up - x), np.max(x - lo)))
+        star = float(discrepancy(x.reshape(-1, 1), method="L2-star"))
+        edges = np.concatenate([[0.0], x, [1.0]])
+        out[str(name)] = {
+            "ks_to_uniform": ks,
+            "star_1d": star,
+            "max_gap": float(np.max(np.diff(edges))),
+            "tail_share_p90": float(np.mean(H[rows, k] > p90[k])),
+        }
+    return out
+
+
+def distance_concentration(
+    X: np.ndarray,
+    snap_distances: np.ndarray,
+    *,
+    seed: int = 0,
+    n_pairs: int = 20000,
+) -> dict[str, float]:
+    """Snap-distance concentration relative to random pool-pair distances.
+
+    In high dimension all pairwise distances concentrate, so a raw snap-distance
+    mean is not comparable across dimensions. The ratio (mean snap distance /
+    mean random-pair distance in the same normalized space) is: values well
+    below 1 mean anchors land materially closer to their snapped member than a
+    random pool point would be, i.e. the snap is still informative at this
+    dimension.
+
+    Args:
+        X: ``(M, d)`` pool coordinates normalized to the unit box.
+        snap_distances: Anchor-to-selected distances from an LHS selector.
+        seed: RNG seed for the random pool pairs.
+        n_pairs: Random pairs sampled to estimate the mean pair distance.
+
+    Returns:
+        Dict with ``mean_snap``, ``mean_random_pair``, ``concentration_ratio``.
+    """
+    X = np.asarray(X, dtype=float)
+    rng = np.random.default_rng(seed)
+    i = rng.integers(0, len(X), size=n_pairs)
+    j = rng.integers(0, len(X), size=n_pairs)
+    keep = i != j
+    pair_d = np.sqrt(((X[i[keep]] - X[j[keep]]) ** 2).sum(axis=1))
+    mean_snap = float(np.mean(snap_distances))
+    mean_pair = float(np.mean(pair_d))
+    return {
+        "mean_snap": mean_snap,
+        "mean_random_pair": mean_pair,
+        "concentration_ratio": mean_snap / mean_pair,
+    }
+
+
+def snap_axis_contributions(
+    X: np.ndarray, rows: np.ndarray, axes: Sequence[str], *, seed: int
+) -> dict[str, float]:
+    """Per-axis share of the squared anchor-to-selected snap distance.
+
+    The weighting diagnostic: correlated axes implicitly weight their shared
+    hazard concept in the Euclidean snap distance. This measures each axis's
+    mean fractional contribution to the squared snap displacement (re-deriving
+    each anchor's partner as its nearest selected member — the reporting proxy
+    used for snap distances). Shares sum to 1 across axes.
+
+    Args:
+        X: ``(M, d)`` pool coordinates normalized to the unit box.
+        rows: Selected row indices (from ``lhs_nn`` at the same ``seed``).
+        axes: Axis names (columns of ``X``).
+        seed: The LHS seed that produced ``rows``.
+
+    Returns:
+        ``{axis: mean fractional contribution}``.
+    """
+    X = np.asarray(X, dtype=float)
+    rows = np.asarray(rows, dtype=int)
+    d = X.shape[1]
+    anchors = ss.generate_lhs_samples(len(rows), d, np.zeros(d), np.ones(d), seed=seed)
+    sel = X[rows]
+    nearest = np.argmin(cdist(anchors, sel), axis=1)
+    diff2 = (anchors - sel[nearest]) ** 2
+    tot = diff2.sum(axis=1, keepdims=True)
+    shares = np.divide(diff2, tot, out=np.full_like(diff2, 1.0 / d), where=tot > 0)
+    mean_share = shares.mean(axis=0)
+    return {str(a): float(s) for a, s in zip(axes, mean_share)}
+
+
+def jaccard(a: np.ndarray, b: np.ndarray) -> float:
+    """Jaccard similarity of two selected-index sets."""
+    sa, sb = set(np.asarray(a).tolist()), set(np.asarray(b).tolist())
+    return float(len(sa & sb) / len(sa | sb)) if sa | sb else float("nan")
+
+
 def pairwise_jaccard(row_sets: Sequence[np.ndarray]) -> float:
     """Mean pairwise Jaccard similarity of selected-index sets (seed stability)."""
     sets = [set(np.asarray(r).tolist()) for r in row_sets]

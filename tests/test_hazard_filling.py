@@ -47,11 +47,17 @@ def test_select_from_candidate_image_basic():
     assert set(out["selected_rows"].tolist()) <= set(range(60))
     assert out["candidate_axes"] == list(hm.CANDIDATE_EVENT_METRICS)
     assert out["H_candidates"].shape == (60, 8)
-    # tail-balanced chosen set: <=2 dry + <=2 wet (<=4 total), subset of candidates.
-    assert 1 <= len(out["chosen_axes"]) <= 4
+    # Keep-all policy: every non-degenerate axis retained minus near-duplicates.
+    assert 3 <= len(out["chosen_axes"]) <= 8
     assert set(out["chosen_axes"]) <= set(hm.CANDIDATE_EVENT_METRICS)
-    assert sum(a.startswith("drought") for a in out["chosen_axes"]) <= 2
-    assert sum(a.startswith("flood") for a in out["chosen_axes"]) <= 2
+    assert out["chosen_axes"] == out["screen"]["retained"]
+    # No retained pair may exceed the near-duplicate threshold.
+    kept_idx = [out["screen"]["spearman_axes"].index(a) for a in out["chosen_axes"]
+                if a in out["screen"]["spearman_axes"]]
+    rho = np.asarray(out["screen"]["spearman_rho"])
+    for i, a in enumerate(kept_idx):
+        for b in kept_idx[i + 1:]:
+            assert abs(rho[a, b]) < hf.DEDUPE_RHO_THRESHOLD
 
 
 def test_select_from_candidate_image_is_deterministic_given_seed():
@@ -126,6 +132,9 @@ def test_normalization_qc_reports_robust_bounds_and_clipped_mass():
         # Clipped mass per side is bounded by the percentile it was cut at.
         assert 0.0 <= qc["clipped_low_frac"] <= 0.02
         assert 0.0 <= qc["clipped_high_frac"] <= 0.02
+    # Face-resident share of SELECTED members is reported (tail-seeking selector
+    # picks clipped members more often than their pool share).
+    assert 0.0 <= norm["selected_face_resident_frac"] <= 1.0
     json.loads(json.dumps(norm))
 
 
@@ -140,6 +149,70 @@ def test_selector_kwargs_bounds_propagate_to_qc():
     assert norm["lo_pct"] == 0.0 and norm["hi_pct"] == 100.0
     for qc in norm["axes"].values():
         assert qc["clipped_low_frac"] == 0.0 and qc["clipped_high_frac"] == 0.0
+
+
+def _screen_pool(M=500, seed=0):
+    """Five independent axes + one duplicate of axis 0 + one constant axis."""
+    rng = np.random.default_rng(seed)
+    base = rng.gamma(2.0, 1.0, size=(M, 5))
+    dup = base[:, [0]] * 3.0 + 0.01 * rng.normal(size=(M, 1))  # rank-duplicate of ax0
+    const = np.full((M, 1), 7.0)
+    H = np.hstack([base, dup, const])
+    names = ["ax0", "ax1", "ax2", "ax3", "ax4", "ax0_dup", "ax_const"]
+    return H, names
+
+
+def test_screen_keeps_all_non_degenerate_non_duplicate_axes():
+    H, names = _screen_pool()
+    screen = hf.screen_hazard_axes(H, names, axis_priority=("ax0",))
+    assert screen["retained"] == ["ax0", "ax1", "ax2", "ax3", "ax4"]
+    assert screen["dropped"]["ax_const"]["reason"] == "degenerate"
+    assert screen["dropped"]["ax0_dup"]["reason"] == "near_duplicate"
+    assert screen["dropped"]["ax0_dup"]["kept_member"] == "ax0"
+    assert abs(screen["dropped"]["ax0_dup"]["rho_with_kept"]) >= hf.DEDUPE_RHO_THRESHOLD
+    assert ["ax0", "ax0_dup"] in screen["near_duplicate_groups"]
+
+
+def test_screen_priority_picks_the_canonical_group_member():
+    H, names = _screen_pool()
+    screen = hf.screen_hazard_axes(H, names, axis_priority=("ax0_dup", "ax0"))
+    assert "ax0_dup" in screen["retained"] and "ax0" not in screen["retained"]
+    assert screen["dropped"]["ax0"]["kept_member"] == "ax0_dup"
+
+
+def test_screen_threshold_is_configurable():
+    """Tightening the threshold prunes correlated-but-distinct axes too."""
+    rng = np.random.default_rng(1)
+    x = rng.gamma(2.0, 1.0, size=(800, 1))
+    corr = x + 0.35 * rng.normal(size=(800, 1)) * x.std()  # |rho_S| ~ 0.9, < 0.95
+    indep = rng.gamma(2.0, 1.0, size=(800, 2))
+    H = np.hstack([x, corr, indep])
+    names = ["ax0", "ax0_corr", "ax1", "ax2"]
+    loose = hf.screen_hazard_axes(H, names, dedupe_threshold=0.95)
+    tight = hf.screen_hazard_axes(H, names, dedupe_threshold=0.80,
+                                  axis_priority=("ax0",))
+    assert loose["retained"] == names  # correlated pair below 0.95 both kept
+    assert tight["retained"] == ["ax0", "ax1", "ax2"]
+
+
+def test_screen_persists_full_spearman_matrix_json_safe():
+    H, names = _screen_pool()
+    screen = hf.screen_hazard_axes(H, names)
+    kept = screen["spearman_axes"]
+    assert "ax_const" not in kept  # matrix spans the non-degenerate axes only
+    rho = np.asarray(screen["spearman_rho"])
+    assert rho.shape == (len(kept), len(kept))
+    np.testing.assert_allclose(np.diag(rho), 1.0)
+    json.loads(json.dumps(screen))
+
+
+def test_screen_rejects_fewer_than_three_retained_axes():
+    """A pathologically degenerate/redundant pool must raise, not pass m=2."""
+    rng = np.random.default_rng(2)
+    a = rng.gamma(2.0, 1.0, size=(400, 1))
+    H = np.hstack([a, a * 2.0, np.full((400, 1), 1.0)])
+    with pytest.raises(ValueError, match="at least 3"):
+        hf.screen_hazard_axes(H, ["ax0", "ax0_dup", "ax_const"])
 
 
 def test_absolute_selector_beats_null_in_its_own_geometry():

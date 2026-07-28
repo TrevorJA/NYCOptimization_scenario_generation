@@ -94,6 +94,53 @@ def test_run_selector_comparison_table_shape_and_stability():
     assert 0.0 <= details["random"]["jaccard_across_seeds"] < 1.0
 
 
+def test_per_axis_selection_metrics_keys_and_ranges():
+    H, axes = _pool()
+    rows = ss.random_subsample(H, 40, seed=0)
+    out = sd.per_axis_selection_metrics(H, rows, axes)
+    assert set(out) == set(axes)
+    for m in out.values():
+        assert set(m) == {"ks_to_uniform", "star_1d", "max_gap", "tail_share_p90"}
+        assert 0.0 <= m["ks_to_uniform"] <= 1.0
+        assert 0.0 <= m["max_gap"] <= 1.0
+        assert 0.0 <= m["tail_share_p90"] <= 1.0
+
+
+def test_per_axis_tail_enrichment_of_the_campaign_selector():
+    """lhs_nn must enrich EVERY axis's P90 tail beyond the unbiased 0.10."""
+    H, axes = _pool(M=600, seed=2)
+    rows = ss.absolute_filling_subsample(H, 60, seed=0)
+    out = sd.per_axis_selection_metrics(H, rows, axes)
+    for m in out.values():
+        assert m["tail_share_p90"] > 0.10
+
+
+def test_distance_concentration_ratio():
+    H, _ = _pool()
+    X = ss.minmax_normalize(H)
+    res = sd.select_lhs_nn(X, 30, seed=0)
+    conc = sd.distance_concentration(X, res.info["snap_distances"], seed=0)
+    assert conc["mean_snap"] > 0.0 and conc["mean_random_pair"] > 0.0
+    # Snapped anchors sit much closer than random pool pairs.
+    assert conc["concentration_ratio"] < 1.0
+
+
+def test_snap_axis_contributions_sum_to_one():
+    H, axes = _pool()
+    X = ss.minmax_normalize(H)
+    rows = ss._lhs_nn_select(X, 30, seed=5)
+    shares = sd.snap_axis_contributions(X, rows, axes, seed=5)
+    assert set(shares) == set(axes)
+    assert sum(shares.values()) == pytest.approx(1.0, abs=1e-9)
+    assert all(v >= 0.0 for v in shares.values())
+
+
+def test_jaccard():
+    a, b = np.array([1, 2, 3]), np.array([2, 3, 4])
+    assert sd.jaccard(a, b) == pytest.approx(0.5)
+    assert sd.jaccard(a, a) == pytest.approx(1.0)
+
+
 def test_designed_selectors_beat_random_on_abs_coverage():
     """Sanity: every designed rule covers abs space better than random on average."""
     H, axes = _pool(M=500, seed=4)

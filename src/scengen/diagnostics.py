@@ -322,16 +322,18 @@ def redundancy_screen(
 # ---------------------------------------------------------------------------
 
 def per_metric_spread(H: np.ndarray, hazard_axes) -> dict:
-    """Per-axis spread / degeneracy screen (Olden & Poff 2003 step 1).
+    """Per-axis spread / degeneracy screen.
 
-    Flags axes that carry too little usable signal to fill — a near-constant
-    axis, a zero-IQR axis, a heavily one-sided (high |skew|) axis, or one whose
-    mass piles at a single value (e.g. a short-window event metric that is 0 for
-    most scenarios because they contain no critical event).
+    Flags axes with **near-zero spread** — a near-constant axis, a zero-IQR
+    axis, or one whose mass piles almost entirely at a single value. Skew and
+    the modal-mass fraction are reported as descriptive statistics but are NOT
+    drop criteria: hazard metrics are strongly right-skewed by nature, and the
+    axis policy keeps every non-degenerate descriptor.
 
     Returns:
         Dict mapping each axis to its ``std``, ``iqr``, ``skew``, ``zero_frac``
-        (fraction equal to the modal/zero value), and a ``degenerate`` flag.
+        (fraction equal to the modal value), and a ``degenerate`` flag
+        (near-zero spread only).
     """
     from scipy.stats import skew as _skew
 
@@ -350,7 +352,7 @@ def per_metric_spread(H: np.ndarray, hazard_axes) -> dict:
             "iqr": iqr,
             "skew": sk,
             "zero_frac": zero_frac,
-            "degenerate": bool(std < 1e-9 or iqr == 0.0 or abs(sk) > 3.0 or zero_frac > 0.5),
+            "degenerate": bool(std < 1e-9 or iqr == 0.0 or zero_frac > 0.95),
         }
     return out
 
@@ -358,11 +360,15 @@ def per_metric_spread(H: np.ndarray, hazard_axes) -> dict:
 def spearman_clusters(
     H: np.ndarray, hazard_axes, *, threshold: float = 0.7, priority=None
 ) -> dict:
-    """Average-linkage Spearman clustering of axes (Olden & Poff 2003 step 2).
+    """Average-linkage Spearman clustering of axes (Olden & Poff 2003 framing).
 
-    Clusters axes on distance ``1 - |rho_S|`` cut so any pair with
-    ``|rho_S| >= threshold`` is redundant (cut height ``1 - threshold``). Keeping
-    one representative per cluster yields a low-redundancy set.
+    A **diagnostic only**: the correlation structure (matrix and ``1 - |rho_S|``
+    cluster tree) is reported alongside the axis selection, never used to reduce
+    the selection axis set (that is
+    :func:`scengen.hazard_filling.screen_hazard_axes`, which prunes only
+    near-duplicates). Clusters axes on distance ``1 - |rho_S|`` cut so any pair
+    with ``|rho_S| >= threshold`` lands in one cluster (cut height
+    ``1 - threshold``).
 
     The representative is chosen by ``priority`` when given (a list of axis names
     in preference order — the operationally-preferred member of each cluster is

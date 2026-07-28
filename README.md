@@ -63,7 +63,7 @@ absolute range-scaled magnitude space — the campaign selector — and, as a re
 sensitivity, empirical-CDF/rank space, plus the copied coverage/LHS primitives and the random
 baseline), `hazard_metrics.py` (8-axis candidate event descriptors: SSI-6 controlling-event run
 theory + daily POT flood pulses; SynHydro provides SSI), and `hazard_filling.py` (driver:
-`select_from_candidate_image` — Olden & Poff redundancy screen → tail-balanced axis set → selection,
+`select_from_candidate_image` — axis screen (degenerate drop + near-duplicate dedupe) → selection,
 operating on the streamed candidate hazard image, never on the pool timeseries). Run `pytest` for
 the selector tests (pure numpy/scipy); the SSI-dependent tests require SynHydro and are skipped
 otherwise.

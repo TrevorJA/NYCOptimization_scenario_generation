@@ -15,8 +15,18 @@ annealing, no discrepancy objective.
 Live pipeline::
 
     candidate hazard image (streamed to hazard_image.npz at pool generation)
-        ->  Olden & Poff redundancy screen  ->  tail-balanced axis set
+        ->  axis screen (degenerate drop + near-duplicate dedupe)
         ->  LHS + nearest-neighbor selection  ->  selected rows
+
+The axis screen keeps **all non-degenerate hazard descriptors**: it drops only
+axes with near-zero spread and, at ``|rho_S| >= 0.95``, prunes near-duplicate
+groups to one canonical member so a single hazard concept cannot enter the
+Euclidean snap twice under two names. Correlated-but-distinct descriptors are
+deliberately retained — the design's coverage guarantee is per-axis marginal
+(LHS stratifies every axis regardless of dimension), so extra axes cost nothing
+in that guarantee. The Spearman correlation structure is reported as a
+diagnostic (:func:`scengen.diagnostics.spearman_clusters`), never used to
+reduce the axis set further.
 
 :func:`select_from_candidate_image` is the entry point. It takes the precomputed
 candidate hazard image and never touches the pool timeseries, so it scales to a
@@ -35,48 +45,21 @@ import pandas as pd
 from . import diagnostics as dg
 from . import subsample as ss
 
-#: Operational preference order for picking one representative per redundancy
-#: cluster (within-cluster members are interchangeable for coverage; this keeps
-#: the operationally-interpretable one). Per tail: magnitude first, then the
-#: rate-of-change / duration facets that form the orthogonal cluster(s).
+#: Canonical priority order for choosing the ONE surviving member of a
+#: near-duplicate axis group (|rho_S| >= threshold on the pool image). Members
+#: of such a group are statistically interchangeable for coverage; this keeps
+#: the operationally-preferred one. Per tail: the integrated-magnitude axis
+#: first, then duration/intensity, then the rate facets.
 DEFAULT_AXIS_PRIORITY: tuple[str, ...] = (
-    "drought_deficit_volume", "drought_onset_rate", "drought_recovery_rate",
-    "drought_duration", "drought_peak_depth",
+    "drought_deficit_volume", "drought_duration", "drought_peak_depth",
+    "drought_onset_rate", "drought_recovery_rate",
     "flood_peak_magnitude", "flood_pulse_duration", "flood_rise_rate",
 )
 
-
-def _tail_of(axis_name: str) -> str:
-    """Map a candidate axis name to its hazard tail (``"dry"`` or ``"wet"``)."""
-    return "dry" if axis_name.startswith("drought") else "wet"
-
-
-def select_balanced_axes(
-    representatives: Sequence[str],
-    priority: Sequence[str],
-    *,
-    max_per_tail: int = 2,
-) -> list[str]:
-    """Tail-balanced final axis set: up to ``max_per_tail`` representatives per tail.
-
-    The Olden & Poff screen determines the redundancy clusters (and one
-    representative each); this caps the final set to ``max_per_tail`` axes per
-    tail in ``priority`` order, so the design carries a balanced wet+dry set
-    (e.g. 2 dry + 2 wet) instead of however many clusters happen to appear. The
-    magnitude axis (first in ``priority`` per tail) is always kept; the next
-    orthogonal-cluster representative fills the second slot.
-
-    Returns:
-        The chosen axis names, dry tail first then wet, each in priority order.
-    """
-    rank = {a: i for i, a in enumerate(priority)}
-    ordered = sorted(representatives, key=lambda a: rank.get(a, len(priority)))
-    by_tail: dict[str, list[str]] = {"dry": [], "wet": []}
-    for a in ordered:
-        t = _tail_of(a)
-        if len(by_tail[t]) < max_per_tail:
-            by_tail[t].append(a)
-    return by_tail["dry"] + by_tail["wet"]
+#: Spearman |rho| at or above which two axes are near-duplicates of one hazard
+#: concept and are pruned to the single canonical member. Deliberately high:
+#: correlated-but-distinct descriptors below it are all retained.
+DEDUPE_RHO_THRESHOLD: float = 0.95
 
 
 def daily_to_monthly(daily: pd.Series, agg: str = "mean") -> np.ndarray:
@@ -169,46 +152,115 @@ def coverage_qc(
     }
 
 
-def screen_axes(
+def screen_hazard_axes(
     H_candidates: np.ndarray,
     candidate_axes: Sequence[str],
     *,
-    redundancy_threshold: float = 0.7,
+    dedupe_threshold: float = DEDUPE_RHO_THRESHOLD,
     axis_priority: Sequence[str] = DEFAULT_AXIS_PRIORITY,
-    max_per_tail: int = 2,
 ) -> dict:
-    """Olden & Poff redundancy screen: candidate axes -> tail-balanced final set.
+    """Axis screen: keep all non-degenerate hazard descriptors minus near-duplicates.
 
-    Drops degenerate axes (near-zero spread), clusters the survivors on
-    ``1 - |rho_S|`` cutting at ``|rho_S| >= redundancy_threshold``, keeps one
-    operationally-preferred representative per cluster, and caps the final set at
-    ``max_per_tail`` axes per hazard tail. Shared by the live selection driver
-    (:func:`select_from_candidate_image`) and the selector diagnostics, so both
-    always screen identically.
+    Drops (a) degenerate axes (near-zero spread; see
+    :func:`scengen.diagnostics.per_metric_spread`) and (b) near-duplicates —
+    axes connected by ``|rho_S| >= dedupe_threshold`` on the pool image form a
+    group pruned to its single highest-``axis_priority`` member, so one hazard
+    concept cannot enter the Euclidean snap twice under two names. Everything
+    else is retained: no clustering-based reduction, no per-tail cap. Shared by
+    the live selection driver (:func:`select_from_candidate_image`) and the
+    selector diagnostics, so both always screen identically.
 
     Args:
         H_candidates: ``(M, n_candidates)`` candidate hazard image.
         candidate_axes: Length-``n_candidates`` axis names.
-        redundancy_threshold: Spearman ``|rho|`` cut for the clustering.
-        axis_priority: Operational preference order for cluster representatives.
-        max_per_tail: Maximum retained axes per hazard tail (dry / wet).
+        dedupe_threshold: Spearman ``|rho|`` at or above which two axes are
+            near-duplicates (groups are the connected components of that
+            relation).
+        axis_priority: Canonical preference order for the surviving member of a
+            near-duplicate group (unknown names rank last, in pool order).
 
     Returns:
-        Dict with ``representatives`` (the tail-balanced final axis list),
-        ``spread`` (per-axis degeneracy stats) and ``clusters``.
+        JSON-serializable dict with ``retained`` (axis names in candidate
+        order), ``dropped`` (``{axis: {reason, kept_member?, rho_with_kept?}}``),
+        ``near_duplicate_groups``, ``spearman_axes`` / ``spearman_rho`` (the
+        full matrix over the non-degenerate axes), ``dedupe_threshold``, and
+        ``spread`` (per-axis degeneracy stats).
+
+    Raises:
+        ValueError: If fewer than 3 axes are retained (a pathologically
+            degenerate or redundant pool).
     """
+    from scipy.stats import spearmanr
+
     H_full = np.asarray(H_candidates, dtype=float)
     candidate_axes = list(candidate_axes)
     spread = dg.per_metric_spread(H_full, candidate_axes)
-    kept = [a for a in candidate_axes if not spread[a]["degenerate"]]
+    dropped: dict[str, dict] = {
+        a: {"reason": "degenerate"} for a in candidate_axes if spread[a]["degenerate"]
+    }
+    kept = [a for a in candidate_axes if a not in dropped]
     keep_idx = [candidate_axes.index(a) for a in kept]
-    clusters = dg.spearman_clusters(
-        H_full[:, keep_idx], kept, threshold=redundancy_threshold, priority=axis_priority
-    )
-    representatives = select_balanced_axes(
-        clusters["representatives"], axis_priority, max_per_tail=max_per_tail
-    )
-    return {"representatives": representatives, "spread": spread, "clusters": clusters["clusters"]}
+
+    rho = np.eye(len(kept))
+    if len(kept) == 2:  # spearmanr returns a scalar for two columns
+        r, _ = spearmanr(H_full[:, keep_idx[0]], H_full[:, keep_idx[1]])
+        rho = np.array([[1.0, float(r)], [float(r), 1.0]])
+    elif len(kept) > 2:
+        rho_raw, _ = spearmanr(H_full[:, keep_idx])
+        rho = np.atleast_2d(rho_raw)
+
+    # Near-duplicate groups: connected components of |rho_S| >= threshold.
+    parent = list(range(len(kept)))
+
+    def _find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(kept)):
+        for j in range(i + 1, len(kept)):
+            if abs(rho[i, j]) >= dedupe_threshold:
+                parent[_find(i)] = _find(j)
+
+    rank = {a: r for r, a in enumerate(axis_priority)}
+    groups: dict[int, list[int]] = {}
+    for i in range(len(kept)):
+        groups.setdefault(_find(i), []).append(i)
+
+    near_duplicate_groups: list[list[str]] = []
+    for members in groups.values():
+        if len(members) == 1:
+            continue
+        names = [kept[i] for i in members]
+        near_duplicate_groups.append(names)
+        survivor = min(names, key=lambda a: (rank.get(a, len(rank)), kept.index(a)))
+        for name in names:
+            if name != survivor:
+                dropped[name] = {
+                    "reason": "near_duplicate",
+                    "kept_member": survivor,
+                    "rho_with_kept": float(rho[kept.index(name), kept.index(survivor)]),
+                }
+
+    retained = [a for a in candidate_axes if a not in dropped]
+    if len(retained) < 3:
+        raise ValueError(
+            f"Axis screen retained only {len(retained)} hazard axes "
+            f"({retained}) of candidates {candidate_axes} at "
+            f"|rho_S| >= {dedupe_threshold}; at least 3 are required. The pool "
+            f"is pathologically degenerate or redundant — inspect the candidate "
+            f"hazard image."
+        )
+    return {
+        "retained": retained,
+        "dropped": dropped,
+        "near_duplicate_groups": near_duplicate_groups,
+        "spearman_axes": kept,
+        "spearman_rho": np.asarray(rho, dtype=float).tolist(),
+        "dedupe_threshold": float(dedupe_threshold),
+        "spread": spread,
+    }
 
 
 def normalization_qc(
@@ -217,6 +269,7 @@ def normalization_qc(
     *,
     lo_pct: float = ss.ROBUST_LO_PCT,
     hi_pct: float = ss.ROBUST_HI_PCT,
+    selected_rows: np.ndarray | None = None,
 ) -> dict:
     """Build-QC of the absolute-space normalization: bounds and clipped mass.
 
@@ -224,16 +277,21 @@ def normalization_qc(
     (rationale at :data:`scengen.subsample.ROBUST_LO_PCT`); pool members outside
     the bounds clip to the box faces. This reports, per chosen axis, the bounds
     actually used and the clipped fraction on each side, so the (bounded) face
-    atoms are measured rather than assumed.
+    atoms are measured rather than assumed. When ``selected_rows`` is given, the
+    share of SELECTED members sitting on at least one box face (any coordinate
+    outside its bounds) is reported too — face-resident members have one or more
+    degenerate (clipped) coordinates in the selection geometry.
 
     Args:
         H_sel: ``(M, d)`` pool sub-image on the chosen axes (raw metric values).
         chosen_axes: Length-``d`` axis names (columns of ``H_sel``).
         lo_pct, hi_pct: Percentile bounds — must match the selector's.
+        selected_rows: Row indices of the selected set into ``H_sel``.
 
     Returns:
-        JSON-serializable dict with ``lo_pct``/``hi_pct`` and a per-axis map
-        ``{axis: {lo, hi, clipped_low_frac, clipped_high_frac}}``.
+        JSON-serializable dict with ``lo_pct``/``hi_pct``, a per-axis map
+        ``{axis: {lo, hi, clipped_low_frac, clipped_high_frac}}``, and (when
+        ``selected_rows`` is given) ``selected_face_resident_frac``.
     """
     H_sel = np.asarray(H_sel, dtype=float)
     lo, hi = ss.robust_range_bounds(H_sel, lo_pct=lo_pct, hi_pct=hi_pct)
@@ -246,7 +304,12 @@ def normalization_qc(
             "clipped_low_frac": float(np.mean(col < lo[a])),
             "clipped_high_frac": float(np.mean(col > hi[a])),
         }
-    return {"lo_pct": float(lo_pct), "hi_pct": float(hi_pct), "axes": axes}
+    out = {"lo_pct": float(lo_pct), "hi_pct": float(hi_pct), "axes": axes}
+    if selected_rows is not None:
+        sel = H_sel[np.asarray(selected_rows, dtype=int)]
+        on_face = ((sel < lo) | (sel > hi)).any(axis=1)
+        out["selected_face_resident_frac"] = float(np.mean(on_face))
+    return out
 
 
 def select_from_candidate_image(
@@ -256,20 +319,19 @@ def select_from_candidate_image(
     *,
     seed: int,
     selector_space: str,
-    redundancy_threshold: float = 0.7,
+    dedupe_threshold: float = DEDUPE_RHO_THRESHOLD,
     axis_priority: Sequence[str] = DEFAULT_AXIS_PRIORITY,
-    max_per_tail: int = 2,
     selector_kwargs: dict | None = None,
 ) -> dict:
     """Screen a precomputed candidate hazard image, then space-fill-select ``n`` scenarios.
 
     The single entry point of the hazard-filling design. Given the candidate image ``H_candidates``
     (``M x n_candidates``) already computed for a candidate pool — streamed at pool generation and
-    reloaded from ``hazard_image.npz`` — it runs the Olden & Poff redundancy screen (drop degenerate
-    axes; keep one operationally-preferred representative per ``|rho_S| >= redundancy_threshold``
-    cluster; cap at ``max_per_tail`` per tail) and then the LHS + nearest-neighbor selector on the
-    screened sub-image. The axis set is screened per pool rather than hard-coded, so it adapts if the
-    generator or pool changes.
+    reloaded from ``hazard_image.npz`` — it runs the axis screen
+    (:func:`screen_hazard_axes`: drop degenerate axes; prune near-duplicate groups at
+    ``|rho_S| >= dedupe_threshold`` to one canonical member; retain everything else) and then the
+    LHS + nearest-neighbor selector on the screened sub-image. The axis set is screened per pool
+    rather than hard-coded, so it adapts if the generator or pool changes.
 
     No pool timeseries are read, so this scales to a very large candidate pool; the caller
     materializes only the selected realizations.
@@ -284,26 +346,27 @@ def select_from_candidate_image(
             ``"cdf"`` = empirical-CDF/rank space — the retained NON-CAMPAIGN sensitivity, which
             preserves the pool marginals and distorts only the joint dependence among axes.
             Required: the two are different designs, so it is never defaulted.
-        redundancy_threshold: Spearman ``|rho|`` cut for the redundancy clustering.
-        axis_priority: Operational preference order for cluster representatives.
-        max_per_tail: Maximum retained axes per hazard tail (dry / wet).
+        dedupe_threshold: Spearman ``|rho|`` at or above which two axes are near-duplicates.
+        axis_priority: Canonical preference order for the surviving member of a near-duplicate
+            group.
         selector_kwargs: Extra kwargs forwarded to the selector (e.g. ``k_pool``; for ``"abs"``,
             ``lo_pct``/``hi_pct`` override the robust p1/p99 campaign bounds and propagate to the
             coverage and normalization QC so all three stay consistent).
 
     Returns:
         Dict with ``selected_rows`` (sorted indices), ``chosen_axes`` (the screened axis set used for
-        selection), ``candidate_axes``, ``H_candidates``, ``screen`` (spread + clusters),
-        ``coverage`` (:func:`coverage_qc` on the chosen sub-image), and ``normalization``
-        (:func:`normalization_qc`: the absolute-space bounds used and per-axis clipped fractions).
+        selection), ``candidate_axes``, ``H_candidates``, ``screen`` (the full
+        :func:`screen_hazard_axes` output: retained/dropped axes with reasons, Spearman matrix,
+        threshold, spread), ``coverage`` (:func:`coverage_qc` on the chosen sub-image), and
+        ``normalization`` (:func:`normalization_qc`: the absolute-space bounds used and per-axis
+        clipped fractions).
     """
     H_full = np.asarray(H_candidates, dtype=float)
     candidate_axes = list(candidate_axes)
-    screen = screen_axes(
-        H_full, candidate_axes, redundancy_threshold=redundancy_threshold,
-        axis_priority=axis_priority, max_per_tail=max_per_tail,
+    screen = screen_hazard_axes(
+        H_full, candidate_axes, dedupe_threshold=dedupe_threshold, axis_priority=axis_priority,
     )
-    chosen_axes = screen["representatives"]
+    chosen_axes = screen["retained"]
     chosen_idx = [candidate_axes.index(a) for a in chosen_axes]
     H_sel = H_full[:, chosen_idx]
 
@@ -322,13 +385,15 @@ def select_from_candidate_image(
     else:
         raise ValueError(f"unknown selector_space={selector_space!r}")
     coverage = coverage_qc(H_sel, sel, seed=seed, lo_pct=lo_pct, hi_pct=hi_pct)
-    normalization = normalization_qc(H_sel, chosen_axes, lo_pct=lo_pct, hi_pct=hi_pct)
+    normalization = normalization_qc(
+        H_sel, chosen_axes, lo_pct=lo_pct, hi_pct=hi_pct, selected_rows=sel
+    )
     return {
         "selected_rows": sel,
         "chosen_axes": chosen_axes,
         "candidate_axes": candidate_axes,
         "H_candidates": H_full,
-        "screen": {"spread": screen["spread"], "clusters": screen["clusters"], "representatives": chosen_axes},
+        "screen": screen,
         "coverage": coverage,
         "normalization": normalization,
     }
