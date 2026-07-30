@@ -60,6 +60,29 @@ def test_select_from_candidate_image_basic():
             assert abs(rho[a, b]) < hf.DEDUPE_RHO_THRESHOLD
 
 
+def test_select_from_candidate_image_selection_axes_restriction():
+    """A caller-fixed selection axis set restricts the screen and the snap to it.
+
+    The policy hook for a campaign axis set chosen by a pool-size saturation
+    diagnostic: the other image columns stay computed but never enter selection.
+    """
+    H, axes = _candidate_image(n_scen=60)
+    subset = [a for a in axes if a not in ("drought_duration", "flood_rise_rate")]
+    out = hf.select_from_candidate_image(
+        H, axes, n=10, seed=0, selector_space="abs", selection_axes=subset,
+    )
+    assert out["candidate_axes"] == subset
+    assert set(out["chosen_axes"]) <= set(subset)
+    assert out["H_candidates"].shape == (60, len(subset))
+    assert out["selected_rows"].shape == (10,)
+
+    with pytest.raises(ValueError, match="selection_axes"):
+        hf.select_from_candidate_image(
+            H, axes, n=10, seed=0, selector_space="abs",
+            selection_axes=["not_a_real_axis"],
+        )
+
+
 def test_select_from_candidate_image_is_deterministic_given_seed():
     """LHS + NN-snap has no stochastic search: the same seed must reproduce the design."""
     H, axes = _candidate_image(n_scen=60)

@@ -319,6 +319,7 @@ def select_from_candidate_image(
     *,
     seed: int,
     selector_space: str,
+    selection_axes: Sequence[str] | None = None,
     dedupe_threshold: float = DEDUPE_RHO_THRESHOLD,
     axis_priority: Sequence[str] = DEFAULT_AXIS_PRIORITY,
     selector_kwargs: dict | None = None,
@@ -346,6 +347,12 @@ def select_from_candidate_image(
             ``"cdf"`` = empirical-CDF/rank space — the retained NON-CAMPAIGN sensitivity, which
             preserves the pool marginals and distorts only the joint dependence among axes.
             Required: the two are different designs, so it is never defaulted.
+        selection_axes: Optional subset of ``candidate_axes`` to consider for selection; the
+            screen and the selector then operate on this restriction (the remaining image
+            columns stay computed and reportable, they just do not enter the snap distance).
+            The caller owns this policy choice — e.g. a campaign axis set fixed by a
+            pool-size saturation diagnostic when the full set cannot meet its per-axis
+            adequacy gate at an affordable pool size. Default ``None`` = all candidates.
         dedupe_threshold: Spearman ``|rho|`` at or above which two axes are near-duplicates.
         axis_priority: Canonical preference order for the surviving member of a near-duplicate
             group.
@@ -363,6 +370,15 @@ def select_from_candidate_image(
     """
     H_full = np.asarray(H_candidates, dtype=float)
     candidate_axes = list(candidate_axes)
+    if selection_axes is not None:
+        missing = [a for a in selection_axes if a not in candidate_axes]
+        if missing:
+            raise ValueError(
+                f"selection_axes not in candidate_axes: {missing} (candidates: {candidate_axes})"
+            )
+        keep = [candidate_axes.index(a) for a in selection_axes]
+        H_full = H_full[:, keep]
+        candidate_axes = list(selection_axes)
     screen = screen_hazard_axes(
         H_full, candidate_axes, dedupe_threshold=dedupe_threshold, axis_priority=axis_priority,
     )
