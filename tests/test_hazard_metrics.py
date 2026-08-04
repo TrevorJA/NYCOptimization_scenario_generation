@@ -150,3 +150,50 @@ def test_flows_to_series_is_month_start_indexed():
     s = hm.flows_to_series(_synthetic_monthly(2, seed=4))
     assert len(s) == 24
     assert s.index[0].month == 10
+
+
+def test_reference_fit_cache_is_result_preserving():
+    """Cache-hit calls must equal a cache-cleared from-scratch computation.
+
+    The second call passes equal-content but distinct-object reference arrays,
+    so a hit proves content keying (never id()).
+    """
+    ref_m, ref_d = _synthetic_monthly(78, seed=0), _synthetic_daily(78, seed=0)
+    scen_m = np.vstack([_synthetic_monthly(10, seed=3, dip=(40, 52))])
+    scen_d = np.vstack([_synthetic_daily(10, seed=3, spike=(400, 405))])
+
+    hm._REFERENCE_FIT_CACHE.clear()
+    H_cold, names_cold = hm.compute_candidate_hazard_image(scen_m, scen_d, ref_m, ref_d)
+    assert len(hm._REFERENCE_FIT_CACHE) == 1
+
+    H_warm, names_warm = hm.compute_candidate_hazard_image(
+        scen_m.copy(), scen_d.copy(), ref_m.copy(), ref_d.copy()
+    )
+    assert len(hm._REFERENCE_FIT_CACHE) == 1  # same content -> same key
+
+    hm._REFERENCE_FIT_CACHE.clear()
+    H_fresh, _ = hm.compute_candidate_hazard_image(scen_m, scen_d, ref_m, ref_d)
+
+    assert names_cold == names_warm
+    np.testing.assert_array_equal(H_cold, H_warm)
+    np.testing.assert_array_equal(H_cold, H_fresh)
+
+
+def test_prefit_kwargs_bypass_and_match_the_cache_path():
+    """Passing prefit fits explicitly must reproduce the default path exactly."""
+    ref_m, ref_d = _synthetic_monthly(78, seed=0), _synthetic_daily(78, seed=0)
+    scen_m = np.vstack([_synthetic_monthly(10, seed=5, dip=(30, 44))])
+    scen_d = np.vstack([_synthetic_daily(10, seed=5, spike=(900, 906))])
+
+    dry_calc, threshold, ref_mean = hm.get_reference_fits(ref_m, ref_d)
+    H_prefit, _ = hm.compute_candidate_hazard_image(
+        scen_m, scen_d, ref_m, ref_d,
+        prefit_dry_calc=dry_calc, prefit_threshold=threshold, prefit_ref_mean=ref_mean,
+    )
+    H_default, _ = hm.compute_candidate_hazard_image(scen_m, scen_d, ref_m, ref_d)
+    np.testing.assert_array_equal(H_prefit, H_default)
+
+    with pytest.raises(ValueError, match="prefit_dry_calc requires"):
+        hm.compute_candidate_hazard_image(
+            scen_m, scen_d, ref_m, ref_d, prefit_dry_calc=dry_calc,
+        )

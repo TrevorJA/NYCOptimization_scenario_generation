@@ -94,6 +94,67 @@ def fit_reference_ssi(
     return calc
 
 
+#: Content-keyed cache for the reference fits (see :func:`get_reference_fits`).
+_REFERENCE_FIT_CACHE: dict = {}
+
+
+def get_reference_fits(
+    reference_monthly: np.ndarray,
+    reference_daily: np.ndarray,
+    *,
+    timescale: int = 6,
+    dist: str = "gamma",
+    start_date: str = "1945-10-01",
+    flood_threshold_pct: float = 95.0,
+):
+    """Fitted ``(dry_calc, threshold, ref_mean)`` for a reference record, cached.
+
+    The reference fit is a deterministic pure function of the two reference
+    arrays and the fit parameters, and every caller (generation hazard blocks,
+    the E_test sub-window image, selection-time scoring) passes the same
+    historical record on each call, so refitting per call is pure waste. Reuse
+    is exactly result-preserving: ``SSI.fit`` is deterministic and
+    ``SSI.transform`` does not mutate fitted state, so the cached object is the
+    same object a fresh fit would produce. Keyed by a content hash of the
+    arrays plus the fit parameters — never by object identity.
+
+    Args:
+        reference_monthly: 1D historical monthly aggregate inflow (SSI fit).
+        reference_daily: 1D historical daily aggregate inflow (POT threshold + mean).
+        timescale: SSI accumulation months.
+        dist: SSI fitting distribution.
+        start_date: October-aligned start for the reference index.
+        flood_threshold_pct: Percentile of the reference daily flow for the POT
+            threshold.
+
+    Returns:
+        ``(dry_calc, threshold, ref_mean)`` — a fitted SSI calculator, the POT
+        threshold (float), and the mean daily reference flow (float).
+    """
+    import hashlib
+
+    ref_m = np.ascontiguousarray(np.asarray(reference_monthly, dtype=float))
+    ref_d = np.ascontiguousarray(np.asarray(reference_daily, dtype=float))
+    key = (
+        hashlib.sha256(ref_m.tobytes()).hexdigest(),
+        hashlib.sha256(ref_d.tobytes()).hexdigest(),
+        int(timescale),
+        str(dist),
+        str(start_date),
+        float(flood_threshold_pct),
+    )
+    hit = _REFERENCE_FIT_CACHE.get(key)
+    if hit is None:
+        dry_calc = fit_reference_ssi(
+            ref_m, timescale=timescale, dist=dist, start_date=start_date
+        )
+        threshold = float(np.percentile(ref_d, flood_threshold_pct))
+        ref_mean = float(ref_d.mean())
+        hit = (dry_calc, threshold, ref_mean)
+        _REFERENCE_FIT_CACHE[key] = hit
+    return hit
+
+
 # ---------------------------------------------------------------------------
 # Run-theory event descriptors (candidate hazard axes; asymmetric by tail)
 # ---------------------------------------------------------------------------
@@ -251,6 +312,9 @@ def compute_candidate_hazard_image(
     dry_select: str = "controlling",
     flood_threshold_pct: float = 95.0,
     wet_exclusion_days: int = 0,
+    prefit_dry_calc=None,
+    prefit_threshold: float | None = None,
+    prefit_ref_mean: float | None = None,
 ) -> tuple[np.ndarray, list[str]]:
     """Compute the 8-axis candidate wet+dry event-descriptor hazard image.
 
@@ -284,6 +348,12 @@ def compute_candidate_hazard_image(
             before the POT descriptors, so the wet axes see the shared metric
             window. Callers compute it by date from the scenario's own
             DatetimeIndex (six months from an October start is 182 or 183 days).
+        prefit_dry_calc: Optional already-fitted SSI calculator; when given
+            (together with ``prefit_threshold`` and ``prefit_ref_mean``) the
+            reference fit/percentile step is skipped entirely. Default None
+            routes through the content-keyed :func:`get_reference_fits` cache.
+        prefit_threshold: POT threshold matching ``prefit_dry_calc``.
+        prefit_ref_mean: Mean daily reference flow matching ``prefit_dry_calc``.
 
     Returns:
         ``(H, list(CANDIDATE_EVENT_METRICS))`` with columns ordered dry then wet.
@@ -292,12 +362,23 @@ def compute_candidate_hazard_image(
         ValueError: If ``wet_exclusion_days`` is negative or leaves no daily
             values in the scenario window.
     """
-    dry_calc = fit_reference_ssi(
-        reference_monthly, timescale=dry_timescale, dist=dist, start_date=reference_start
-    )
-    ref_daily = np.asarray(reference_daily, dtype=float)
-    threshold = float(np.percentile(ref_daily, flood_threshold_pct))
-    ref_mean = float(ref_daily.mean())
+    if prefit_dry_calc is not None:
+        if prefit_threshold is None or prefit_ref_mean is None:
+            raise ValueError(
+                "prefit_dry_calc requires prefit_threshold and prefit_ref_mean."
+            )
+        dry_calc = prefit_dry_calc
+        threshold = float(prefit_threshold)
+        ref_mean = float(prefit_ref_mean)
+    else:
+        dry_calc, threshold, ref_mean = get_reference_fits(
+            reference_monthly,
+            reference_daily,
+            timescale=dry_timescale,
+            dist=dist,
+            start_date=reference_start,
+            flood_threshold_pct=flood_threshold_pct,
+        )
 
     scenario_monthly = np.asarray(scenario_monthly, dtype=float)
     scenario_daily = np.asarray(scenario_daily, dtype=float)
