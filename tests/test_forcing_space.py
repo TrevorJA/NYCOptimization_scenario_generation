@@ -327,7 +327,16 @@ def test_real_mean_scales_by_a_regardless_of_c():
 
 def test_forcing_hash_stable_and_sensitive():
     p = np.ones((5, 12))
-    h1 = fs.forcing_hash(p, envelope_csv="a.csv", margin=0.075, seed=0)
-    h2 = fs.forcing_hash(p, envelope_csv="a.csv", margin=0.075, seed=0)
-    h3 = fs.forcing_hash(p, envelope_csv="a.csv", margin=0.075, seed=1)
-    assert h1 == h2 and h1 != h3
+    kw = dict(
+        envelope_csv="a.csv", margin=0.075,
+        start_date="1945-01-01",
+        baseline_period=("1980-01-01", "2019-12-31"),
+        full_period=("1945-01-01", "2023-12-31"),
+    )
+    h1 = fs.forcing_hash(p, seed=0, **kw)
+    h2 = fs.forcing_hash(p, seed=0, **kw)
+    h3 = fs.forcing_hash(p, seed=1, **kw)
+    h4 = fs.forcing_hash(p, seed=0, **{**kw, "start_date": "1945-10-01"})
+    h5 = fs.forcing_hash(p, seed=0, **{**kw, "full_period": ("1946-01-01", "2021-12-31")})
+    assert h1 == h2
+    assert len({h1, h3, h4, h5}) == 4

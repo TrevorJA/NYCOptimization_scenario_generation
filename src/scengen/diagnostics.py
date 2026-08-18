@@ -39,6 +39,7 @@ def save_hazard_image(
     hazard_axes,
     realization_ids,
     selected_rows,
+    reference_start: str,
     chosen_axes=None,
 ) -> Path:
     """Persist a pool hazard image + the selected rows for offline diagnostics.
@@ -53,6 +54,10 @@ def save_hazard_image(
         hazard_axes: Length-``m`` candidate-axis names (columns of ``H``).
         realization_ids: Length-``M`` pool realization ids aligned with ``H`` rows.
         selected_rows: Indices into ``H`` of the selected subset.
+        reference_start: Start date the SSI reference fit was stamped with
+            (date-convention provenance; :func:`load_hazard_image` rejects
+            images that lack it, so pre-convention artifacts self-label as
+            stale rather than silently mixing conventions).
         chosen_axes: The screened subset of ``hazard_axes`` actually used for
             selection (defaults to all of ``hazard_axes``).
 
@@ -69,13 +74,26 @@ def save_hazard_image(
         chosen_axes=np.asarray(list(chosen_axes), dtype=object),
         realization_ids=np.asarray(list(realization_ids), dtype=int),
         selected_rows=np.asarray(list(selected_rows), dtype=int),
+        reference_start=np.asarray(str(reference_start), dtype=object),
     )
     return path
 
 
 def load_hazard_image(path: str | Path) -> dict:
-    """Load a hazard image written by :func:`save_hazard_image`."""
-    data = np.load(Path(path), allow_pickle=True)
+    """Load a hazard image written by :func:`save_hazard_image`.
+
+    Raises:
+        ValueError: If the file lacks the ``reference_start`` provenance field —
+            it predates the truthful January date convention and its hazard
+            coordinates must not be mixed with current-convention artifacts.
+    """
+    path = Path(path)
+    data = np.load(path, allow_pickle=True)
+    if "reference_start" not in data:
+        raise ValueError(
+            f"{path} lacks 'reference_start' provenance: it was written before the "
+            f"truthful January date convention and is stale. Regenerate the hazard image."
+        )
     axes = [str(a) for a in data["hazard_axes"]]
     chosen = [str(a) for a in data["chosen_axes"]] if "chosen_axes" in data else list(axes)
     return {
@@ -84,6 +102,7 @@ def load_hazard_image(path: str | Path) -> dict:
         "chosen_axes": chosen,
         "realization_ids": data["realization_ids"].astype(int),
         "selected_rows": data["selected_rows"].astype(int),
+        "reference_start": str(data["reference_start"]),
     }
 
 

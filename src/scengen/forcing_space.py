@@ -436,13 +436,25 @@ def apply_climate_adjustment(
     return y_bar_new, sigma_new
 
 
-def forcing_hash(profiles: np.ndarray, *, envelope_csv: str | Path, margin: float, seed: int) -> str:
+def forcing_hash(
+    profiles: np.ndarray,
+    *,
+    envelope_csv: str | Path,
+    margin: float,
+    seed: int,
+    start_date: str,
+    baseline_period: tuple[str, str],
+    full_period: tuple[str, str],
+) -> str:
     """Return a stable content hash of the forcing-space configuration for the provenance manifest.
 
-    Uses ``hashlib.sha1`` over the profiles + config (NOT the process-salted builtin ``hash``).
+    Covers the profiles, the envelope config, the realization stamp epoch, and the
+    generator fit-record bounds — everything whose change alters the staged flows
+    for a fixed seed. Uses ``hashlib.sha1`` (NOT the process-salted builtin ``hash``).
     """
     h = hashlib.sha1()
     h.update(np.ascontiguousarray(np.asarray(profiles, dtype=float)).tobytes())
     h.update(str(Path(envelope_csv)).encode())
     h.update(f"{margin!r}|{seed!r}".encode())
+    h.update(f"{start_date!r}|{tuple(baseline_period)!r}|{tuple(full_period)!r}".encode())
     return h.hexdigest()

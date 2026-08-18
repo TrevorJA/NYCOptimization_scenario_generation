@@ -34,6 +34,9 @@ class EnsembleManifest:
         slug: Output slug under which NYCOptimization resolves this ensemble.
         created: ISO timestamp (passed in by the caller; this module performs no clock reads).
         source_kind: Generator family tag (e.g. ``"synhydro_kn"``).
+        start_date: Date of day 0 of every staged realization (a January 1; the
+            generator synthesizes calendar-year sequences and the index is
+            anchored at this epoch during generation).
         notes: Free-form provenance notes.
     """
 
@@ -49,6 +52,7 @@ class EnsembleManifest:
     slug: str = ""
     created: str = ""
     source_kind: str = "synhydro_kn"
+    start_date: str = ""
     notes: str = ""
 
     def to_json(self) -> str:

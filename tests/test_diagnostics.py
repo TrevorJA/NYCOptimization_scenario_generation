@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from scengen import diagnostics as dg
 from scengen import subsample as ss
@@ -85,8 +86,26 @@ def test_save_load_hazard_image_roundtrip(tmp_path):
         tmp_path / "hazard_image.npz",
         H=H, hazard_axes=["a", "b", "c"],
         realization_ids=list(range(50)), selected_rows=sel,
+        reference_start="1945-01-01",
     )
     back = dg.load_hazard_image(path)
     np.testing.assert_allclose(back["H"], H)
     assert back["hazard_axes"] == ["a", "b", "c"]
     np.testing.assert_array_equal(back["selected_rows"], sel)
+    assert back["reference_start"] == "1945-01-01"
+
+
+def test_load_hazard_image_rejects_pre_convention_files(tmp_path):
+    """An image without reference_start provenance predates the truthful
+    January date convention and must not load."""
+    path = tmp_path / "hazard_image.npz"
+    np.savez(
+        path,
+        H=np.zeros((2, 2)),
+        hazard_axes=np.asarray(["a", "b"], dtype=object),
+        chosen_axes=np.asarray(["a", "b"], dtype=object),
+        realization_ids=np.asarray([0, 1]),
+        selected_rows=np.asarray([0]),
+    )
+    with pytest.raises(ValueError, match="reference_start"):
+        dg.load_hazard_image(path)

@@ -22,8 +22,12 @@ Design choices (methods 3.3):
     (per calendar month), then applied to every scenario, so hazard
     coordinates are comparable across the pool and the historic reference. The
     POT threshold and mean-daily normalizer are likewise fixed on that record.
-  - Series are water-year aligned (October start) so SSI's per-calendar-month
-    fit applies to the correct months of each scenario.
+  - Series carry TRUE calendar dates (January starts: the reference record and
+    every synthetic scenario begin on a January 1), so SSI's per-calendar-month
+    fit applies to the correct months of each scenario. The scenario stamp and
+    the reference start must share a start month; the image computation asserts
+    this, because a one-sided drift degrades to silently clipped SSI rather
+    than an error.
   - Both tails score the SAME effective window as the downstream objective
     metrics: the first six months of each scenario. The dry axes exclude it
     IMPLICITLY — SSI-6 needs six months of accumulation, so it is undefined
@@ -40,17 +44,25 @@ import pandas as pd
 #: Default pywrdrb nodes summed to form the aggregate NYC inflow series.
 DEFAULT_NYC_INFLOW_NODES: tuple[str, ...] = ("cannonsville", "pepacton", "neversink")
 
-_WATER_YEAR_START = "2000-10-01"  # October start; only month-of-year matters
+#: Stamp for scenario rows entering the SSI transform. Only the month-of-year
+#: matters, and it must equal the reference fit's start month (asserted in
+#: :func:`compute_candidate_hazard_image`): scenarios and the reference record
+#: both start on a true January 1.
+_SCENARIO_STAMP_START = "2000-01-01"
+
+#: True start of the historical reference record (calendar dates).
+_REFERENCE_START = "1945-01-01"
 
 
 def flows_to_series(
-    monthly_flows: np.ndarray, start_date: str = _WATER_YEAR_START, freq: str = "MS"
+    monthly_flows: np.ndarray, start_date: str = _SCENARIO_STAMP_START, freq: str = "MS"
 ) -> pd.Series:
     """Wrap a 1D/2D monthly-flow array in a pd.Series with a DatetimeIndex.
 
     Copied from MOEA-FIND ``objectives.flows_to_series``. SynHydro's SSI requires
-    a DatetimeIndex; ``start_date`` should be an October so the per-calendar-month
-    SSI fit aligns with each scenario's water-year months.
+    a DatetimeIndex; ``start_date`` must share its month with the reference fit's
+    start so the per-calendar-month SSI fit aligns with each scenario's months
+    (both are true January starts).
     """
     arr = np.asarray(monthly_flows, dtype=float)
     if arr.ndim == 2:
@@ -74,17 +86,17 @@ def fit_reference_ssi(
     *,
     timescale: int = 6,
     dist: str = "gamma",
-    start_date: str = "1945-10-01",
+    start_date: str = _REFERENCE_START,
 ):
     """Fit an SSI calculator on the historical reference monthly series.
 
     Args:
         reference_monthly: 1D monthly aggregate-inflow array for the historical
-            reference record (water-year aligned, October start).
+            reference record (true calendar dates, January start).
         timescale: SSI accumulation period in months (SSI-6, the reservoir-drought
             timescale, is the default of the candidate image).
         dist: Fitting distribution (gamma default).
-        start_date: October-aligned start for the reference index.
+        start_date: True start date of the reference record.
 
     Returns:
         A fitted SynHydro SSI calculator to transform scenarios with.
@@ -104,7 +116,7 @@ def get_reference_fits(
     *,
     timescale: int = 6,
     dist: str = "gamma",
-    start_date: str = "1945-10-01",
+    start_date: str = _REFERENCE_START,
     flood_threshold_pct: float = 95.0,
 ):
     """Fitted ``(dry_calc, threshold, ref_mean)`` for a reference record, cached.
@@ -123,7 +135,7 @@ def get_reference_fits(
         reference_daily: 1D historical daily aggregate inflow (POT threshold + mean).
         timescale: SSI accumulation months.
         dist: SSI fitting distribution.
-        start_date: October-aligned start for the reference index.
+        start_date: True start date of the reference record.
         flood_threshold_pct: Percentile of the reference daily flow for the POT
             threshold.
 
@@ -307,7 +319,7 @@ def compute_candidate_hazard_image(
     *,
     dry_timescale: int = 6,
     dist: str = "gamma",
-    reference_start: str = "1945-10-01",
+    reference_start: str = _REFERENCE_START,
     dry_end_threshold: int = 3,
     dry_select: str = "controlling",
     flood_threshold_pct: float = 95.0,
@@ -339,7 +351,10 @@ def compute_candidate_hazard_image(
         reference_daily: 1D historical daily aggregate inflow (flood threshold + mean).
         dry_timescale: Months accumulated for the drought SSI (SSI-6 default).
         dist: SSI fitting distribution.
-        reference_start: October-aligned start for the dry SSI fit.
+        reference_start: True start date of the reference record for the dry
+            SSI fit. Its month must equal the scenario stamp's start month
+            (asserted below): the fitted gammas are keyed by stamped calendar
+            month, so a one-sided drift silently yields NaN/clipped SSI.
         dry_end_threshold: Drought-event recovery hysteresis (months).
         dry_select: Controlling-event selector (see :func:`critical_event_descriptors`).
         flood_threshold_pct: Percentile of the reference daily flow used as the
@@ -347,7 +362,7 @@ def compute_candidate_hazard_image(
         wet_exclusion_days: Leading days cut from each scenario's DAILY series
             before the POT descriptors, so the wet axes see the shared metric
             window. Callers compute it by date from the scenario's own
-            DatetimeIndex (six months from an October start is 182 or 183 days).
+            DatetimeIndex (six months from a January start is 181 or 182 days).
         prefit_dry_calc: Optional already-fitted SSI calculator; when given
             (together with ``prefit_threshold`` and ``prefit_ref_mean``) the
             reference fit/percentile step is skipped entirely. Default None
@@ -362,6 +377,15 @@ def compute_candidate_hazard_image(
         ValueError: If ``wet_exclusion_days`` is negative or leaves no daily
             values in the scenario window.
     """
+    # The fitted gammas are keyed by stamped calendar month on BOTH the fit and
+    # the transform, so the scenario stamp and the reference start must share a
+    # month; a mismatch produces silently NaN/clipped SSI, never an exception.
+    if pd.Timestamp(reference_start).month != pd.Timestamp(_SCENARIO_STAMP_START).month:
+        raise ValueError(
+            f"reference_start={reference_start!r} and the scenario stamp "
+            f"{_SCENARIO_STAMP_START!r} must share a start month; the per-calendar-"
+            f"month SSI fit otherwise rotates against the scenarios."
+        )
     if prefit_dry_calc is not None:
         if prefit_threshold is None or prefit_ref_mean is None:
             raise ValueError(

@@ -75,8 +75,10 @@ class ForcingEnsembleConfig:
             this is pure waste for every other design; default False.
         flowtype: Historical full-record flow dataset key (e.g. ``pub_nhmv10_BC_withObsScaled``).
         baseline_period: (start, end) for the baseline-fit Kirsch (eqs 10-11 reference); used only
-            when ``population == "du_forced"``.
-        full_period: (start, end) for the full-record-fit Kirsch (the generator).
+            when ``population == "du_forced"``. Calendar-year bounds: Kirsch fits by calendar
+            ``(year, month)`` and silently drops incomplete calendar years.
+        full_period: (start, end) for the full-record-fit Kirsch (the generator). Calendar-year
+            bounds spanning the whole record, for the same reason.
         output_dir: Staging directory (under STAGED_ENSEMBLE_DIR); artifacts land here.
         hazard_axes: Screened hazard-metric axis names to compute for H (from :mod:`hazard_metrics`).
         mean_frac_csv: CMIP6 multiplicative mean change-factor (``_frac_``) CSV (required for
@@ -87,7 +89,9 @@ class ForcingEnsembleConfig:
         bound_pct: Percentiles defining each harmonic parameter's CMIP6 range (default (5, 95), the
             empirical 90% range).
         margin: Optional fractional widening of the harmonic-parameter hypercube.
-        start_date: Date assigned to day 0 of each realization.
+        start_date: Date of day 0 of each realization. Must be a January 1: the generator
+            synthesizes calendar-year (January-start) sequences, and the daily index is anchored
+            at this epoch during generation (never re-stamped afterwards).
         store_daily: If True (default), write the daily gage/inflow HDF5s. If False, discard daily
             traces after hazard computation and persist only H + params (the streaming mode).
         hazard_block_size: Forcing profiles processed per streaming block (bounds peak memory).
@@ -107,8 +111,8 @@ class ForcingEnsembleConfig:
     seed_domain: str | None = None
     compute_hazard_image: bool = False
     flowtype: str = "pub_nhmv10_BC_withObsScaled"
-    baseline_period: tuple[str, str] = ("1980-10-01", "2019-09-30")
-    full_period: tuple[str, str] = ("1945-10-01", "2022-09-30")
+    baseline_period: tuple[str, str] = ("1980-01-01", "2019-12-31")
+    full_period: tuple[str, str] = ("1945-01-01", "2023-12-31")
     output_dir: Path | None = None
     hazard_axes: tuple[str, ...] = ()
     mean_frac_csv: str | Path | None = None
@@ -117,7 +121,7 @@ class ForcingEnsembleConfig:
     std_csv: str | Path | None = None
     bound_pct: tuple[float, float] = (5.0, 95.0)
     margin: float = 0.0
-    start_date: str = "1945-10-01"
+    start_date: str = "1945-01-01"
     store_daily: bool = True
     hazard_block_size: int = 256
     chunk_size: int = 0
