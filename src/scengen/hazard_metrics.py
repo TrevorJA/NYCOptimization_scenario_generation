@@ -3,9 +3,9 @@
 Computes the per-scenario hazard vector ``h(r)`` that the hazard-filling design
 selects on. The image is the **8-axis candidate event-descriptor set** of
 :func:`compute_candidate_hazard_image`: five dry axes from SSI-6 run theory on
-the controlling drought event of the monthly aggregate NYC inflow (deficit
-volume, duration, peak depth, onset rate, recovery rate) and three wet axes from
-peaks-over-threshold on the daily aggregate NYC inflow (peak magnitude, pulse
+the controlling drought event of the monthly aggregate NYC inflow (magnitude,
+duration, severity, onset rate, recovery rate) and three wet axes from
+peaks-over-threshold on the daily aggregate NYC inflow (peak discharge, pulse
 duration, rise rate). The two tails deliberately use different event models --
 see the run-theory section below. The candidate set is then screened per pool to
 a low-redundancy subset (Olden & Poff; :mod:`scengen.diagnostics` and
@@ -190,9 +190,9 @@ def get_reference_fits(
 #: (onset/recovery; IHA Group 5; flash-drought lit Otkin 2018) are the
 #: orthogonal facet that yields a genuine SECOND drought axis after screening.
 DRY_EVENT_METRICS: tuple[str, ...] = (
-    "drought_deficit_volume",  # |sum SSI over run| — magnitude facet
+    "drought_magnitude",       # |sum SSI over run| — cumulative-deficit facet
     "drought_duration",        # run length (months) — duration facet
-    "drought_peak_depth",      # |min SSI in run| — intensity
+    "drought_severity",        # |min SSI in run| — peak-deficit intensity
     "drought_onset_rate",      # |peak SSI| / months to trough — rate of change
     "drought_recovery_rate",   # |peak SSI| / recovery months — rate of change
 )
@@ -200,7 +200,7 @@ DRY_EVENT_METRICS: tuple[str, ...] = (
 #: Wet (flood / high-flow) candidate axes: critical peaks-over-threshold pulse
 #: descriptors on the daily aggregate NYC inflow (Q5 / 95th-pct threshold).
 WET_EVENT_METRICS: tuple[str, ...] = (
-    "flood_peak_magnitude",    # window max daily flow / reference mean — magnitude
+    "flood_peak_discharge",    # window max daily flow / reference mean — peak discharge
     "flood_pulse_duration",    # days above threshold in the critical pulse — duration
     "flood_rise_rate",         # max 1-day rise of the critical rising limb / ref mean — rate
 )
@@ -228,14 +228,14 @@ def critical_event_descriptors(
             ``"deepest"`` (min severity), or ``"first"`` (earliest run).
 
     Returns:
-        Dict with non-negative ``duration``, ``volume`` (|cumulative SSI|), and
-        ``depth`` (|peak SSI|). All zero when the scenario has no critical event.
+        Dict with non-negative ``duration``, ``magnitude`` (|cumulative SSI|), and
+        ``severity`` (|peak SSI|). All zero when the scenario has no critical event.
     """
     from synhydro.droughts.ssi import get_drought_metrics  # lazy
 
     dm = get_drought_metrics(ssi_series, end_drought_threshold_months=end_threshold)
     if len(dm) == 0:
-        return {"duration": 0.0, "volume": 0.0, "depth": 0.0,
+        return {"duration": 0.0, "magnitude": 0.0, "severity": 0.0,
                 "onset_rate": 0.0, "recovery_rate": 0.0}
     if select == "controlling":
         i = dm["magnitude"].astype(float).abs().idxmax()
@@ -246,19 +246,19 @@ def critical_event_descriptors(
     else:
         raise ValueError(f"unknown select={select!r}")
     crit = dm.loc[i]
-    depth = float(abs(crit["severity"]))
+    severity = float(abs(crit["severity"]))
 
-    # Rate-of-change descriptors (orthogonal to magnitude/duration/intensity).
+    # Rate-of-change descriptors (orthogonal to magnitude/duration/severity).
     start = pd.Timestamp(crit["start"])
     peak = pd.Timestamp(crit["max_severity_date"])
     months_to_peak = max(1, (peak.year - start.year) * 12 + (peak.month - start.month))
     recovery_months = max(1.0, float(crit.get("recovery_period", 0.0)))
     return {
         "duration": float(crit["duration"]),
-        "volume": float(abs(crit["magnitude"])),
-        "depth": depth,
-        "onset_rate": depth / months_to_peak,
-        "recovery_rate": depth / recovery_months,
+        "magnitude": float(abs(crit["magnitude"])),
+        "severity": severity,
+        "onset_rate": severity / months_to_peak,
+        "recovery_rate": severity / recovery_months,
     }
 
 
@@ -278,18 +278,18 @@ def pot_flood_descriptors(
         ref_mean: Reference mean daily flow, used to non-dimensionalize magnitudes.
 
     Returns:
-        Dict with ``peak_magnitude`` (window max / ``ref_mean``; always defined,
+        Dict with ``peak_discharge`` (window max / ``ref_mean``; always defined,
         so no zero-inflation), ``pulse_duration`` (days above ``threshold`` in the
         critical pulse), and ``rise_rate`` (max 1-day rise on the critical rising
         limb / ``ref_mean``).
     """
     daily = np.asarray(daily, dtype=float)
     ref_mean = float(ref_mean) if ref_mean > 0 else 1.0
-    peak_magnitude = float(daily.max() / ref_mean)
+    peak_discharge = float(daily.max() / ref_mean)
 
     above = daily > threshold
     if not above.any():
-        return {"peak_magnitude": peak_magnitude, "pulse_duration": 0.0, "rise_rate": 0.0}
+        return {"peak_discharge": peak_discharge, "pulse_duration": 0.0, "rise_rate": 0.0}
 
     peak_idx = int(np.argmax(daily))  # the global max is above threshold when any are
     lo = peak_idx
@@ -305,7 +305,7 @@ def pot_flood_descriptors(
     rising = daily[onset:peak_idx + 1]
     rise_rate = float(max(np.diff(rising).max(), 0.0) / ref_mean) if rising.size > 1 else 0.0
     return {
-        "peak_magnitude": peak_magnitude,
+        "peak_discharge": peak_discharge,
         "pulse_duration": pulse_duration,
         "rise_rate": rise_rate,
     }
@@ -420,7 +420,7 @@ def compute_candidate_hazard_image(
         d = critical_event_descriptors(dry_ssi, end_threshold=dry_end_threshold, select=dry_select)
         w = pot_flood_descriptors(d_row[cut:], threshold=threshold, ref_mean=ref_mean)
         rows.append([
-            d["volume"], d["duration"], d["depth"], d["onset_rate"], d["recovery_rate"],
-            w["peak_magnitude"], w["pulse_duration"], w["rise_rate"],
+            d["magnitude"], d["duration"], d["severity"], d["onset_rate"], d["recovery_rate"],
+            w["peak_discharge"], w["pulse_duration"], w["rise_rate"],
         ])
     return np.asarray(rows, dtype=float), list(CANDIDATE_EVENT_METRICS)

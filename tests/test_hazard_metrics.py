@@ -45,22 +45,22 @@ def test_critical_event_descriptors_are_nonnegative_and_complete():
     calc = hm.fit_reference_ssi(ref)
     ssi = calc.transform(hm.flows_to_series(_synthetic_monthly(5, seed=1, dip=(24, 36))))
     out = hm.critical_event_descriptors(ssi)
-    assert set(out) == {"duration", "volume", "depth", "onset_rate", "recovery_rate"}
+    assert set(out) == {"duration", "magnitude", "severity", "onset_rate", "recovery_rate"}
     assert all(np.isfinite(v) and v >= 0.0 for v in out.values())
 
 
-def test_drought_scenario_has_larger_deficit_volume():
+def test_drought_scenario_has_larger_magnitude():
     """An imposed multi-month low-flow dip must deepen the controlling event."""
     ref = _synthetic_monthly(78, seed=0)
     calc = hm.fit_reference_ssi(ref)
 
-    def volume(flows):
+    def magnitude(flows):
         return hm.critical_event_descriptors(
             calc.transform(hm.flows_to_series(flows))
-        )["volume"]
+        )["magnitude"]
 
-    normal = volume(_synthetic_monthly(5, seed=2))
-    drought = volume(_synthetic_monthly(5, seed=2, dip=(24, 36)))
+    normal = magnitude(_synthetic_monthly(5, seed=2))
+    drought = magnitude(_synthetic_monthly(5, seed=2, dip=(24, 36)))
     assert drought > normal
 
 
@@ -77,8 +77,8 @@ def test_pot_flood_descriptors_respond_to_a_pulse():
         _synthetic_daily(5, seed=1, spike=(400, 410)),
         threshold=threshold, ref_mean=ref_mean,
     )
-    assert set(plain) == {"peak_magnitude", "pulse_duration", "rise_rate"}
-    assert spiked["peak_magnitude"] > plain["peak_magnitude"]
+    assert set(plain) == {"peak_discharge", "pulse_duration", "rise_rate"}
+    assert spiked["peak_discharge"] > plain["peak_discharge"]
     assert spiked["pulse_duration"] >= plain["pulse_duration"]
 
 
@@ -122,7 +122,7 @@ def test_wet_exclusion_hides_a_flood_inside_the_first_six_months():
     # Without the exclusion the same flood dominates the wet axes.
     H_no_cut, _ = hm.compute_candidate_hazard_image(scen_m, early_flood_d, ref_m, ref_d)
     H_ref, _ = hm.compute_candidate_hazard_image(scen_m, plain_d, ref_m, ref_d)
-    assert H_no_cut[0, wet][0] > H_ref[0, wet][0]  # flood_peak_magnitude
+    assert H_no_cut[0, wet][0] > H_ref[0, wet][0]  # flood_peak_discharge
 
 
 def test_wet_exclusion_keeps_a_flood_after_the_window():

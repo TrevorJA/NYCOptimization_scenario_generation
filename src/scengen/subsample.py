@@ -4,7 +4,7 @@ Selects ``n`` realizations from a candidate pool's hazard image ``H``. The
 specification is ``scenario_design_methods.md`` (§4.3 selector, §6 diagnostics).
 
 **Why these selectors SELECT rather than GENERATE.** Hazard coordinates (drought
-deficit volume, flood peak magnitude, ...) are *emergent* properties of a
+magnitude, flood peak discharge, ...) are *emergent* properties of a
 realized flow sequence: no generator can be asked to emit a realization at a
 prescribed drought severity, because severity is only known after the sequence
 exists. A hazard-space design therefore has nothing to generate *to* -- it must

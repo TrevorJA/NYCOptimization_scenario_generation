@@ -15,7 +15,7 @@ def _pool(M=400, seed=0):
     H = rng.gamma(2.0, 1.0, size=(M, 3))
     # 20% zero-event windows: ALL dry descriptors are zero when no event occurs.
     H[: M // 5, :2] = 0.0
-    return H, ["drought_deficit_volume", "drought_onset_rate", "flood_peak_magnitude"]
+    return H, ["drought_magnitude", "drought_onset_rate", "flood_peak_discharge"]
 
 
 @pytest.mark.parametrize("name", sorted(sd.SELECTORS))

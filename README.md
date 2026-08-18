@@ -18,7 +18,7 @@ The distinction is conceptual, and it decides which code path a design uses:
   generator, so the design draws an LHS over `theta` and generates one realization per design point.
   It never subsamples — there is nothing to snap to. Lives in `forcing_space` /
   `forcing_ensemble`.
-- **Hazard-filling SELECTS.** Hazard coordinates (drought deficit volume, flood peak magnitude, …)
+- **Hazard-filling SELECTS.** Hazard coordinates (drought magnitude, flood peak discharge, …)
   are *emergent* properties of a realized flow sequence — no generator can be asked to produce a
   realization at a prescribed drought severity. So a hazard-space design must select from a finite
   **candidate pool**, and its LHS anchors must snap to the nearest real pool member. That

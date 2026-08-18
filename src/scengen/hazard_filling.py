@@ -2,7 +2,7 @@
 
 A hazard-filling design owns a **candidate pool** of realizations and selects a
 subset of them. It must select rather than generate: hazard coordinates (drought
-deficit volume, flood peak magnitude, ...) are *emergent* properties of a
+magnitude, flood peak discharge, ...) are *emergent* properties of a
 realized flow sequence, so no generator can be asked to produce a realization at
 a prescribed drought severity. The Latin-hypercube anchors of the design are
 therefore snapped to the nearest real pool member (see :mod:`scengen.subsample`).
@@ -51,9 +51,9 @@ from . import subsample as ss
 #: the operationally-preferred one. Per tail: the integrated-magnitude axis
 #: first, then duration/intensity, then the rate facets.
 DEFAULT_AXIS_PRIORITY: tuple[str, ...] = (
-    "drought_deficit_volume", "drought_duration", "drought_peak_depth",
+    "drought_magnitude", "drought_duration", "drought_severity",
     "drought_onset_rate", "drought_recovery_rate",
-    "flood_peak_magnitude", "flood_pulse_duration", "flood_rise_rate",
+    "flood_peak_discharge", "flood_pulse_duration", "flood_rise_rate",
 )
 
 #: Spearman |rho| at or above which two axes are near-duplicates of one hazard

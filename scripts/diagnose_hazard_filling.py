@@ -44,12 +44,12 @@ _SEL_COLOR = "#c1272d"
 
 #: Physical units per candidate axis, for absolute-space axis labels.
 _AXIS_UNITS = {
-    "drought_deficit_volume": "|SSI|·mo",
+    "drought_magnitude": "|SSI|·mo",
     "drought_duration": "mo",
-    "drought_peak_depth": "|SSI|",
+    "drought_severity": "|SSI|",
     "drought_onset_rate": "|SSI|/mo",
     "drought_recovery_rate": "|SSI|/mo",
-    "flood_peak_magnitude": "x mean daily",
+    "flood_peak_discharge": "x mean daily",
     "flood_pulse_duration": "days",
     "flood_rise_rate": "x mean daily",
 }
