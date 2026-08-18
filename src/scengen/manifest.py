@@ -34,9 +34,10 @@ class EnsembleManifest:
         slug: Output slug under which NYCOptimization resolves this ensemble.
         created: ISO timestamp (passed in by the caller; this module performs no clock reads).
         source_kind: Generator family tag (e.g. ``"synhydro_kn"``).
-        start_date: Date of day 0 of every staged realization (a January 1; the
-            generator synthesizes calendar-year sequences and the index is
-            anchored at this epoch during generation).
+        start_date: Date of day 0 of every staged realization (a December 1;
+            the generator synthesizes calendar-year sequences, so one extra
+            year is generated and the frames trimmed to this epoch during
+            generation — the index anchors here by construction).
         notes: Free-form provenance notes.
     """
 

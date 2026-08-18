@@ -40,6 +40,7 @@ def save_hazard_image(
     realization_ids,
     selected_rows,
     reference_start: str,
+    scenario_stamp_start: str | None = None,
     chosen_axes=None,
 ) -> Path:
     """Persist a pool hazard image + the selected rows for offline diagnostics.
@@ -58,15 +59,25 @@ def save_hazard_image(
             (date-convention provenance; :func:`load_hazard_image` rejects
             images that lack it, so pre-convention artifacts self-label as
             stale rather than silently mixing conventions).
+        scenario_stamp_start: The scenario stamp the image's rows were computed
+            under (defaults to the current ``hazard_metrics._SCENARIO_STAMP_START``).
+            Second provenance leg: :func:`load_hazard_image` rejects an image
+            whose recorded stamp differs from the current convention, so a
+            scenario-epoch change (e.g. January to December) invalidates old
+            images loudly.
         chosen_axes: The screened subset of ``hazard_axes`` actually used for
             selection (defaults to all of ``hazard_axes``).
 
     Returns:
         The written path.
     """
+    from .hazard_metrics import _SCENARIO_STAMP_START
+
     path = Path(path)
     if chosen_axes is None:
         chosen_axes = list(hazard_axes)
+    if scenario_stamp_start is None:
+        scenario_stamp_start = _SCENARIO_STAMP_START
     np.savez(
         path,
         H=np.asarray(H, dtype=float),
@@ -75,6 +86,7 @@ def save_hazard_image(
         realization_ids=np.asarray(list(realization_ids), dtype=int),
         selected_rows=np.asarray(list(selected_rows), dtype=int),
         reference_start=np.asarray(str(reference_start), dtype=object),
+        scenario_stamp_start=np.asarray(str(scenario_stamp_start), dtype=object),
     )
     return path
 
@@ -83,16 +95,28 @@ def load_hazard_image(path: str | Path) -> dict:
     """Load a hazard image written by :func:`save_hazard_image`.
 
     Raises:
-        ValueError: If the file lacks the ``reference_start`` provenance field —
-            it predates the truthful January date convention and its hazard
-            coordinates must not be mixed with current-convention artifacts.
+        ValueError: If the file lacks the ``reference_start`` provenance field
+            (it predates the truthful date-stamping convention), or if its
+            recorded ``scenario_stamp_start`` differs from the current scenario
+            stamp (it was computed under a retired scenario epoch, e.g. the
+            January convention). Either way its hazard coordinates must not be
+            mixed with current-convention artifacts.
     """
+    from .hazard_metrics import _SCENARIO_STAMP_START
+
     path = Path(path)
     data = np.load(path, allow_pickle=True)
     if "reference_start" not in data:
         raise ValueError(
             f"{path} lacks 'reference_start' provenance: it was written before the "
-            f"truthful January date convention and is stale. Regenerate the hazard image."
+            f"truthful date-stamping convention and is stale. Regenerate the hazard image."
+        )
+    stamp = str(data["scenario_stamp_start"]) if "scenario_stamp_start" in data else None
+    if stamp != _SCENARIO_STAMP_START:
+        raise ValueError(
+            f"{path} records scenario_stamp_start={stamp!r}, but the current scenario "
+            f"stamp is {_SCENARIO_STAMP_START!r}: the image was computed under a retired "
+            f"scenario epoch and is stale. Regenerate the hazard image."
         )
     axes = [str(a) for a in data["hazard_axes"]]
     chosen = [str(a) for a in data["chosen_axes"]] if "chosen_axes" in data else list(axes)

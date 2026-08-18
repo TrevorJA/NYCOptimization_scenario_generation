@@ -156,24 +156,30 @@ def test_wet_exclusion_rejects_a_window_it_would_empty():
 
 
 def test_flows_to_series_is_month_start_indexed():
-    """SynHydro's SSI needs a DatetimeIndex; the scenario stamp is a true January
-    start, matching the reference fit's start month."""
+    """SynHydro's SSI needs a DatetimeIndex; the scenario stamp carries the
+    scenarios' true December start (the realization epoch). The reference
+    keeps its own (January) start — the SSI fit is calendar-month-keyed, so
+    the two stamps need not share a month."""
     s = hm.flows_to_series(_synthetic_monthly(2, seed=4))
     assert len(s) == 24
-    assert s.index[0].month == 1
-    assert s.index[0].month == pd.Timestamp(hm._REFERENCE_START).month
+    assert s.index[0].month == 12
+    assert s.index[0].month == pd.Timestamp(hm._SCENARIO_STAMP_START).month
+    assert pd.Timestamp(hm._REFERENCE_START).month == 1
 
 
-def test_hazard_image_rejects_rotated_reference_start():
-    """A reference stamp whose month differs from the scenario stamp must raise:
-    the mismatch otherwise degrades to silently NaN/clipped SSI."""
+def test_hazard_image_accepts_month_keyed_reference_start():
+    """The SSI fit and transform are keyed by CALENDAR MONTH (spei maps
+    observations onto year-2000 dates and groups by month), so a reference
+    whose truthful start month differs from the scenario stamp's computes
+    finite coordinates rather than raising."""
     ref_m, ref_d = _synthetic_monthly(78, seed=0), _synthetic_daily(78, seed=0)
     scen_m = np.vstack([_synthetic_monthly(5, seed=1)])
     scen_d = np.vstack([_synthetic_daily(5, seed=1)])
-    with pytest.raises(ValueError, match="share a start month"):
-        hm.compute_candidate_hazard_image(
-            scen_m, scen_d, ref_m, ref_d, reference_start="1945-10-01",
-        )
+    H, axes = hm.compute_candidate_hazard_image(
+        scen_m, scen_d, ref_m, ref_d, reference_start="1945-10-01",
+    )
+    assert H.shape == (1, len(axes))
+    assert np.isfinite(H).all()
 
 
 def test_dry_axes_rotate_with_a_mislabeled_seasonal_reference():

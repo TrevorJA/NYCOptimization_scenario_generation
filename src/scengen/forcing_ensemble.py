@@ -89,9 +89,12 @@ class ForcingEnsembleConfig:
         bound_pct: Percentiles defining each harmonic parameter's CMIP6 range (default (5, 95), the
             empirical 90% range).
         margin: Optional fractional widening of the harmonic-parameter hypercube.
-        start_date: Date of day 0 of each realization. Must be a January 1: the generator
-            synthesizes calendar-year (January-start) sequences, and the daily index is anchored
-            at this epoch during generation (never re-stamped afterwards).
+        start_date: Date of day 0 of each realization. Must be a December 1 (the epoch is
+            chosen so the 6-month metric exclusion ends on June 1, the FFMP operating-year
+            boundary): the generator synthesizes calendar-year (January-anchored) sequences,
+            so generation produces ``realization_years + 1`` calendar years and trims the
+            monthly frames to the epoch window before disaggregation — the daily index is
+            anchored at this epoch by construction (never re-stamped afterwards).
         store_daily: If True (default), write the daily gage/inflow HDF5s. If False, discard daily
             traces after hazard computation and persist only H + params (the streaming mode).
         hazard_block_size: Forcing profiles processed per streaming block (bounds peak memory).
@@ -121,7 +124,7 @@ class ForcingEnsembleConfig:
     std_csv: str | Path | None = None
     bound_pct: tuple[float, float] = (5.0, 95.0)
     margin: float = 0.0
-    start_date: str = "1945-01-01"
+    start_date: str = "1945-12-01"
     store_daily: bool = True
     hazard_block_size: int = 256
     chunk_size: int = 0

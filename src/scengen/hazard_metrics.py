@@ -22,18 +22,24 @@ Design choices (methods 3.3):
     (per calendar month), then applied to every scenario, so hazard
     coordinates are comparable across the pool and the historic reference. The
     POT threshold and mean-daily normalizer are likewise fixed on that record.
-  - Series carry TRUE calendar dates (January starts: the reference record and
-    every synthetic scenario begin on a January 1), so SSI's per-calendar-month
-    fit applies to the correct months of each scenario. The scenario stamp and
-    the reference start must share a start month; the image computation asserts
-    this, because a one-sided drift degrades to silently clipped SSI rather
-    than an error.
+  - Series carry TRUE calendar dates: the reference record starts on its own
+    true date (a January 1), every synthetic scenario on the December-1
+    realization epoch, and the scenario stamp carries that December start. The
+    SSI fit and transform are both keyed by CALENDAR MONTH (spei's
+    ``group_yearly_df`` remaps observations onto year-2000 dates and groups by
+    month), so the reference and the scenarios may start in different months —
+    what matters is that each stamp is truthful, or the per-month fit rotates
+    against the content.
   - Both tails score the SAME effective window as the downstream objective
-    metrics: the first six months of each scenario. The dry axes exclude it
-    IMPLICITLY — SSI-6 needs six months of accumulation, so it is undefined
-    there and no run-theory event can start in it — and the wet axes exclude it
-    EXPLICITLY via ``wet_exclusion_days`` on the daily series. The monthly input
-    is therefore never truncated: those months are the SSI accumulation input.
+    metrics: the scenario minus its first six months (Dec – May, ending
+    exactly on June 1, the FFMP operating-year boundary). The dry axes
+    exclude it EXACTLY — SSI-6 is undefined over the first five months, and
+    the transform additionally drops the exclusion window's final month so no
+    run-theory event can start before June — and the wet axes exclude it
+    EXPLICITLY via ``wet_exclusion_days`` on the daily series. The monthly
+    input keeps its leading months: they are the SSI accumulation input.
+    Callers cut the trailing partial year from both inputs, so the scored
+    window is identical to the objectives' unit window.
 """
 
 from __future__ import annotations
@@ -44,11 +50,12 @@ import pandas as pd
 #: Default pywrdrb nodes summed to form the aggregate NYC inflow series.
 DEFAULT_NYC_INFLOW_NODES: tuple[str, ...] = ("cannonsville", "pepacton", "neversink")
 
-#: Stamp for scenario rows entering the SSI transform. Only the month-of-year
-#: matters, and it must equal the reference fit's start month (asserted in
-#: :func:`compute_candidate_hazard_image`): scenarios and the reference record
-#: both start on a true January 1.
-_SCENARIO_STAMP_START = "2000-01-01"
+#: Stamp for scenario rows entering the SSI transform. Only the months-of-year
+#: matter (the SSI fit is keyed by calendar month), and the stamp must carry
+#: the scenarios' TRUE start month — a December 1, the realization epoch
+#: (chosen so the 6-month exclusion ends on June 1, the FFMP operating-year
+#: boundary). The reference record keeps its own true (January) start.
+_SCENARIO_STAMP_START = "1999-12-01"
 
 #: True start of the historical reference record (calendar dates).
 _REFERENCE_START = "1945-01-01"
@@ -60,9 +67,10 @@ def flows_to_series(
     """Wrap a 1D/2D monthly-flow array in a pd.Series with a DatetimeIndex.
 
     Copied from MOEA-FIND ``objectives.flows_to_series``. SynHydro's SSI requires
-    a DatetimeIndex; ``start_date`` must share its month with the reference fit's
-    start so the per-calendar-month SSI fit aligns with each scenario's months
-    (both are true January starts).
+    a DatetimeIndex; ``start_date`` must carry the array's TRUE start month so
+    the per-calendar-month SSI fit applies to the correct months (the fit is
+    month-keyed, so the reference and the scenarios may start in different
+    months as long as each stamp is truthful).
     """
     arr = np.asarray(monthly_flows, dtype=float)
     if arr.ndim == 2:
@@ -336,13 +344,15 @@ def compute_candidate_hazard_image(
     a ``flood_threshold_pct`` (Q5/95th-pct) threshold and mean-daily
     normalization, both fixed once on the historical reference.
 
-    Both tails describe the same effective window — the scenario minus its first
-    six months. The dry axes exclude it implicitly (SSI-``dry_timescale``
-    accumulation spin-up), the wet axes explicitly via ``wet_exclusion_days``.
-    Only the SCENARIO daily window is truncated: the POT threshold and
-    ``ref_mean`` stay fitted on the full historical reference, and the monthly
-    input is never truncated because its leading months are the SSI accumulation
-    input.
+    Both tails describe the same effective window — the scenario minus its
+    first ``dry_timescale`` months. The dry axes exclude it exactly (the SSI
+    accumulation spin-up plus an explicit cut of the exclusion window's final
+    month before run theory), the wet axes explicitly via
+    ``wet_exclusion_days``. Only the SCENARIO windows are truncated: the POT
+    threshold and ``ref_mean`` stay fitted on the full historical reference,
+    and the scenario monthly input keeps its leading months as the SSI
+    accumulation input (callers cut any trailing partial year from both
+    scenario inputs before this function).
 
     Args:
         scenario_monthly: ``(n, n_months)`` monthly aggregate NYC inflow.
@@ -352,9 +362,10 @@ def compute_candidate_hazard_image(
         dry_timescale: Months accumulated for the drought SSI (SSI-6 default).
         dist: SSI fitting distribution.
         reference_start: True start date of the reference record for the dry
-            SSI fit. Its month must equal the scenario stamp's start month
-            (asserted below): the fitted gammas are keyed by stamped calendar
-            month, so a one-sided drift silently yields NaN/clipped SSI.
+            SSI fit. The fitted gammas are keyed by CALENDAR MONTH (spei maps
+            observations onto year-2000 dates and groups by month), so the
+            reference and the scenario stamp may start in different months —
+            each stamp just has to be truthful for its own content.
         dry_end_threshold: Drought-event recovery hysteresis (months).
         dry_select: Controlling-event selector (see :func:`critical_event_descriptors`).
         flood_threshold_pct: Percentile of the reference daily flow used as the
@@ -362,7 +373,8 @@ def compute_candidate_hazard_image(
         wet_exclusion_days: Leading days cut from each scenario's DAILY series
             before the POT descriptors, so the wet axes see the shared metric
             window. Callers compute it by date from the scenario's own
-            DatetimeIndex (six months from a January start is 181 or 182 days).
+            DatetimeIndex (six months from a December start is 182 or 183
+            days).
         prefit_dry_calc: Optional already-fitted SSI calculator; when given
             (together with ``prefit_threshold`` and ``prefit_ref_mean``) the
             reference fit/percentile step is skipped entirely. Default None
@@ -377,15 +389,13 @@ def compute_candidate_hazard_image(
         ValueError: If ``wet_exclusion_days`` is negative or leaves no daily
             values in the scenario window.
     """
-    # The fitted gammas are keyed by stamped calendar month on BOTH the fit and
-    # the transform, so the scenario stamp and the reference start must share a
-    # month; a mismatch produces silently NaN/clipped SSI, never an exception.
-    if pd.Timestamp(reference_start).month != pd.Timestamp(_SCENARIO_STAMP_START).month:
-        raise ValueError(
-            f"reference_start={reference_start!r} and the scenario stamp "
-            f"{_SCENARIO_STAMP_START!r} must share a start month; the per-calendar-"
-            f"month SSI fit otherwise rotates against the scenarios."
-        )
+    # The fitted gammas are keyed by CALENDAR MONTH on both the fit and the
+    # transform (spei's group_yearly_df maps every observation onto its
+    # year-2000 date and groups by month), so the reference and the scenario
+    # stamp need NOT share a start month. Each stamp must simply be truthful
+    # for its own content — the reference's true start and the scenarios'
+    # December epoch — which the callers' generation-time anchor assertions
+    # guarantee.
     if prefit_dry_calc is not None:
         if prefit_threshold is None or prefit_ref_mean is None:
             raise ValueError(
@@ -417,6 +427,13 @@ def compute_candidate_hazard_image(
     rows = []
     for m_row, d_row in zip(scenario_monthly, scenario_daily):
         dry_ssi = dry_calc.transform(flows_to_series(m_row, freq="MS"))
+        # Drop the exclusion window (the first `dry_timescale` months) from the
+        # SSI series before run theory. SSI is undefined (NaN) over the first
+        # dry_timescale - 1 months, but its FIRST defined value lands in the
+        # exclusion window's final month; cutting it makes the dry-axis
+        # exclusion exact — no event can start before the metric window opens
+        # (June 1 on the December-start scenarios).
+        dry_ssi = dry_ssi.iloc[int(dry_timescale):]
         d = critical_event_descriptors(dry_ssi, end_threshold=dry_end_threshold, select=dry_select)
         w = pot_flood_descriptors(d_row[cut:], threshold=threshold, ref_mean=ref_mean)
         rows.append([
