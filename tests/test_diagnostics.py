@@ -93,6 +93,42 @@ def test_save_load_hazard_image_roundtrip(tmp_path):
     assert back["hazard_axes"] == ["a", "b", "c"]
     np.testing.assert_array_equal(back["selected_rows"], sel)
     assert back["reference_start"] == "1945-01-01"
+    from scengen.hazard_metrics import _DRY_CUT_MONTHS
+
+    assert back["dry_cut_months"] == _DRY_CUT_MONTHS
+
+
+def test_load_hazard_image_rejects_another_dry_cut(tmp_path):
+    """The dry-axis cut is the third provenance leg: an image recording a
+    different cut, or none at all, was scored on another window and must not
+    load."""
+    from scengen.hazard_metrics import _DRY_CUT_MONTHS, _SCENARIO_STAMP_START
+
+    H = _clustered_hazard_image(M=20, d=2)
+    other = dg.save_hazard_image(
+        tmp_path / "other_cut.npz", H=H, hazard_axes=["a", "b"],
+        realization_ids=list(range(20)), selected_rows=[0, 1],
+        reference_start="1945-01-01", dry_cut_months=_DRY_CUT_MONTHS + 5,
+    )
+    with pytest.raises(ValueError, match="dry_cut_months"):
+        dg.load_hazard_image(other)
+
+    missing = tmp_path / "no_cut.npz"
+    np.savez(
+        missing,
+        H=H,
+        hazard_axes=np.asarray(["a", "b"], dtype=object),
+        chosen_axes=np.asarray(["a", "b"], dtype=object),
+        realization_ids=np.arange(20),
+        selected_rows=np.asarray([0, 1]),
+        reference_start=np.asarray("1945-01-01", dtype=object),
+        scenario_stamp_start=np.asarray(_SCENARIO_STAMP_START, dtype=object),
+    )
+    with pytest.raises(ValueError, match="dry_cut_months"):
+        dg.load_hazard_image(missing)
+    with np.load(missing, allow_pickle=True) as z:
+        with pytest.raises(ValueError, match="dry_cut_months"):
+            dg.check_hazard_image_provenance(z, missing)
 
 
 def test_load_hazard_image_rejects_pre_convention_files(tmp_path):

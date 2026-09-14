@@ -351,8 +351,9 @@ def select_from_candidate_image(
             screen and the selector then operate on this restriction (the remaining image
             columns stay computed and reportable, they just do not enter the snap distance).
             The caller owns this policy choice — e.g. a campaign axis set fixed by a
-            pool-size saturation diagnostic when the full set cannot meet its per-axis
-            adequacy gate at an affordable pool size. Default ``None`` = all candidates.
+            pool-size saturation diagnostic of per-axis tail enrichment, when the full
+            set's enrichment is geometry-limited at any affordable pool size. Default
+            ``None`` = all candidates.
         dedupe_threshold: Spearman ``|rho|`` at or above which two axes are near-duplicates.
         axis_priority: Canonical preference order for the surviving member of a near-duplicate
             group.

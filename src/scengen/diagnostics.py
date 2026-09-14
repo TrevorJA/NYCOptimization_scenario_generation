@@ -41,6 +41,7 @@ def save_hazard_image(
     selected_rows,
     reference_start: str,
     scenario_stamp_start: str | None = None,
+    dry_cut_months: int | None = None,
     chosen_axes=None,
 ) -> Path:
     """Persist a pool hazard image + the selected rows for offline diagnostics.
@@ -65,19 +66,27 @@ def save_hazard_image(
             whose recorded stamp differs from the current convention, so a
             scenario-epoch change (e.g. January to December) invalidates old
             images loudly.
+        dry_cut_months: Leading months of each scenario absent from the scored
+            dry series (defaults to the current
+            ``hazard_metrics._DRY_CUT_MONTHS``). Third provenance leg:
+            :func:`load_hazard_image` rejects an image whose recorded cut
+            differs from the current one, so an image scored on another dry
+            window is refused rather than mixed.
         chosen_axes: The screened subset of ``hazard_axes`` actually used for
             selection (defaults to all of ``hazard_axes``).
 
     Returns:
         The written path.
     """
-    from .hazard_metrics import _SCENARIO_STAMP_START
+    from .hazard_metrics import _DRY_CUT_MONTHS, _SCENARIO_STAMP_START
 
     path = Path(path)
     if chosen_axes is None:
         chosen_axes = list(hazard_axes)
     if scenario_stamp_start is None:
         scenario_stamp_start = _SCENARIO_STAMP_START
+    if dry_cut_months is None:
+        dry_cut_months = _DRY_CUT_MONTHS
     np.savez(
         path,
         H=np.asarray(H, dtype=float),
@@ -87,25 +96,31 @@ def save_hazard_image(
         selected_rows=np.asarray(list(selected_rows), dtype=int),
         reference_start=np.asarray(str(reference_start), dtype=object),
         scenario_stamp_start=np.asarray(str(scenario_stamp_start), dtype=object),
+        dry_cut_months=np.asarray(int(dry_cut_months)),
     )
     return path
 
 
-def load_hazard_image(path: str | Path) -> dict:
-    """Load a hazard image written by :func:`save_hazard_image`.
+def check_hazard_image_provenance(data, path: str | Path) -> None:
+    """Refuse a persisted hazard image scored under another convention.
+
+    Every hazard-image writer (:func:`save_hazard_image`, the E_test
+    sub-window scorer and the historic-window cache) persists three
+    provenance legs, and every reader checks them here before using the
+    coordinates: ``reference_start`` must be present, ``scenario_stamp_start``
+    must equal the current scenario stamp, and ``dry_cut_months`` must equal
+    the current dry-axis cut. Coordinates from an image failing any leg are
+    not commensurable with current ones.
+
+    Args:
+        data: The opened ``.npz`` (any mapping of field name to array).
+        path: The file, named in the error.
 
     Raises:
-        ValueError: If the file lacks the ``reference_start`` provenance field
-            (it predates the truthful date-stamping convention), or if its
-            recorded ``scenario_stamp_start`` differs from the current scenario
-            stamp (it was computed under a retired scenario epoch, e.g. the
-            January convention). Either way its hazard coordinates must not be
-            mixed with current-convention artifacts.
+        ValueError: Naming the failing leg.
     """
-    from .hazard_metrics import _SCENARIO_STAMP_START
+    from .hazard_metrics import _DRY_CUT_MONTHS, _SCENARIO_STAMP_START
 
-    path = Path(path)
-    data = np.load(path, allow_pickle=True)
     if "reference_start" not in data:
         raise ValueError(
             f"{path} lacks 'reference_start' provenance: it was written before the "
@@ -118,6 +133,28 @@ def load_hazard_image(path: str | Path) -> dict:
             f"stamp is {_SCENARIO_STAMP_START!r}: the image was computed under a retired "
             f"scenario epoch and is stale. Regenerate the hazard image."
         )
+    cut = int(data["dry_cut_months"]) if "dry_cut_months" in data else None
+    if cut != _DRY_CUT_MONTHS:
+        raise ValueError(
+            f"{path} records dry_cut_months={cut!r}, but the current dry-axis scoring "
+            f"window starts {_DRY_CUT_MONTHS} months after the scenario start: the "
+            f"image was scored on another dry window and is stale. Regenerate the "
+            f"hazard image."
+        )
+
+
+def load_hazard_image(path: str | Path) -> dict:
+    """Load a hazard image written by :func:`save_hazard_image`.
+
+    Raises:
+        ValueError: If :func:`check_hazard_image_provenance` rejects the file:
+            it lacks ``reference_start``, records another scenario stamp, or
+            records another dry-axis cut. Its hazard coordinates must not be
+            mixed with current-convention artifacts.
+    """
+    path = Path(path)
+    data = np.load(path, allow_pickle=True)
+    check_hazard_image_provenance(data, path)
     axes = [str(a) for a in data["hazard_axes"]]
     chosen = [str(a) for a in data["chosen_axes"]] if "chosen_axes" in data else list(axes)
     return {
@@ -127,6 +164,7 @@ def load_hazard_image(path: str | Path) -> dict:
         "realization_ids": data["realization_ids"].astype(int),
         "selected_rows": data["selected_rows"].astype(int),
         "reference_start": str(data["reference_start"]),
+        "dry_cut_months": int(data["dry_cut_months"]),
     }
 
 

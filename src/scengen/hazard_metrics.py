@@ -33,13 +33,15 @@ Design choices (methods 3.3):
   - Both tails score the SAME effective window as the downstream objective
     metrics: the scenario minus its first six months (Dec – May, ending
     exactly on June 1, the FFMP operating-year boundary). The dry axes
-    exclude it EXACTLY — SSI-6 is undefined over the first five months, and
-    the transform additionally drops the exclusion window's final month so no
-    run-theory event can start before June — and the wet axes exclude it
+    exclude it EXACTLY: the scored SSI series starts on the first month after
+    the window (:func:`scored_dry_ssi`), so no run-theory event can start
+    before June and none starting in June is missed. The wet axes exclude it
     EXPLICITLY via ``wet_exclusion_days`` on the daily series. The monthly
     input keeps its leading months: they are the SSI accumulation input.
     Callers cut the trailing partial year from both inputs, so the scored
-    window is identical to the objectives' unit window.
+    window is identical to the objectives' unit window. Every persisted
+    hazard image records the dry cut (``_DRY_CUT_MONTHS``) as provenance, so
+    an image scored on another window is refused rather than mixed.
 """
 
 from __future__ import annotations
@@ -59,6 +61,13 @@ _SCENARIO_STAMP_START = "1999-12-01"
 
 #: True start of the historical reference record (calendar dates).
 _REFERENCE_START = "1945-01-01"
+
+#: Leading months of every scenario absent from the scored dry series: the
+#: SSI-6 accumulation window, which on the December-start scenarios ends on
+#: June 1. Also the default SSI timescale, since the exclusion window IS the
+#: accumulation window. Persisted with every hazard image (``dry_cut_months``)
+#: and checked on load, so images scored on another dry window never mix.
+_DRY_CUT_MONTHS = 6
 
 
 def flows_to_series(
@@ -173,6 +182,55 @@ def get_reference_fits(
         hit = (dry_calc, threshold, ref_mean)
         _REFERENCE_FIT_CACHE[key] = hit
     return hit
+
+
+def scored_dry_ssi(
+    dry_calc, monthly_row: np.ndarray, *, dry_timescale: int = _DRY_CUT_MONTHS
+) -> pd.Series:
+    """SSI series of one scenario on the dry-axis scoring window.
+
+    Transforms the December-stamped monthly series with the fitted calculator
+    and returns it from exactly ``dry_timescale`` months after the scenario
+    start (June 1 on the December-start scenarios), the first month after the
+    exclusion window. The transform returns only the months on which SSI is
+    defined, so the cut applied here is whatever it left of the exclusion
+    window; the result is the same whether the transform drops the undefined
+    leading months or returns them as NaN.
+
+    Args:
+        dry_calc: Fitted SynHydro SSI calculator (:func:`fit_reference_ssi`).
+        monthly_row: 1D monthly aggregate NYC inflow of one scenario, leading
+            months included (they are the accumulation input).
+        dry_timescale: SSI accumulation months, which is also the length of
+            the exclusion window.
+
+    Returns:
+        The SSI series stamped from the first scored month, one value per
+        month of the scoring window.
+
+    Raises:
+        ValueError: If the transform dropped more leading months than the
+            exclusion window holds, or the scored series does not start on
+            the first month after that window.
+    """
+    monthly_row = np.asarray(monthly_row, dtype=float)
+    ssi = dry_calc.transform(flows_to_series(monthly_row, freq="MS"))
+    already_dropped = len(monthly_row) - len(ssi)
+    remaining = int(dry_timescale) - already_dropped
+    if remaining < 0:
+        raise ValueError(
+            f"the SSI transform dropped {already_dropped} leading months, more than "
+            f"the {int(dry_timescale)}-month exclusion window."
+        )
+    ssi = ssi.iloc[remaining:]
+    expected = pd.Timestamp(_SCENARIO_STAMP_START) + pd.DateOffset(months=int(dry_timescale))
+    if len(ssi) == 0 or ssi.index[0] != expected:
+        raise ValueError(
+            f"the scored SSI series must start on {expected.date()}, the first month "
+            f"after the exclusion window; got "
+            f"{ssi.index[0].date() if len(ssi) else 'an empty series'}."
+        )
+    return ssi
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +383,7 @@ def compute_candidate_hazard_image(
     reference_monthly: np.ndarray,
     reference_daily: np.ndarray,
     *,
-    dry_timescale: int = 6,
+    dry_timescale: int = _DRY_CUT_MONTHS,
     dist: str = "gamma",
     reference_start: str = _REFERENCE_START,
     dry_end_threshold: int = 3,
@@ -345,9 +403,9 @@ def compute_candidate_hazard_image(
     normalization, both fixed once on the historical reference.
 
     Both tails describe the same effective window — the scenario minus its
-    first ``dry_timescale`` months. The dry axes exclude it exactly (the SSI
-    accumulation spin-up plus an explicit cut of the exclusion window's final
-    month before run theory), the wet axes explicitly via
+    first ``dry_timescale`` months. The dry axes exclude it exactly: run
+    theory sees the SSI series from the first month after the window
+    (:func:`scored_dry_ssi`). The wet axes exclude it explicitly via
     ``wet_exclusion_days``. Only the SCENARIO windows are truncated: the POT
     threshold and ``ref_mean`` stay fitted on the full historical reference,
     and the scenario monthly input keeps its leading months as the SSI
@@ -426,14 +484,9 @@ def compute_candidate_hazard_image(
         )
     rows = []
     for m_row, d_row in zip(scenario_monthly, scenario_daily):
-        dry_ssi = dry_calc.transform(flows_to_series(m_row, freq="MS"))
-        # Drop the exclusion window (the first `dry_timescale` months) from the
-        # SSI series before run theory. SSI is undefined (NaN) over the first
-        # dry_timescale - 1 months, but its FIRST defined value lands in the
-        # exclusion window's final month; cutting it makes the dry-axis
-        # exclusion exact — no event can start before the metric window opens
-        # (June 1 on the December-start scenarios).
-        dry_ssi = dry_ssi.iloc[int(dry_timescale):]
+        # Run theory scores the SSI series from the first month after the
+        # exclusion window (June 1 on the December-start scenarios).
+        dry_ssi = scored_dry_ssi(dry_calc, m_row, dry_timescale=dry_timescale)
         d = critical_event_descriptors(dry_ssi, end_threshold=dry_end_threshold, select=dry_select)
         w = pot_flood_descriptors(d_row[cut:], threshold=threshold, ref_mean=ref_mean)
         rows.append([
