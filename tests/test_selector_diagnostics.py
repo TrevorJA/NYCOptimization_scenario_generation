@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.optimize import linear_sum_assignment
+from scipy.spatial.distance import cdist
 
 from scengen import selector_diagnostics as sd
 from scengen import subsample as ss
@@ -128,8 +130,7 @@ def test_distance_concentration_ratio():
 def test_snap_axis_contributions_sum_to_one():
     H, axes = _pool()
     X = ss.minmax_normalize(H)
-    rows = ss._lhs_nn_select(X, 30, seed=5)
-    shares = sd.snap_axis_contributions(X, rows, axes, seed=5)
+    shares = sd.snap_axis_contributions(X, 30, axes, seed=5)
     assert set(shares) == set(axes)
     assert sum(shares.values()) == pytest.approx(1.0, abs=1e-9)
     assert all(v >= 0.0 for v in shares.values())
@@ -151,3 +152,72 @@ def test_designed_selectors_beat_random_on_abs_coverage():
     mean_l2 = table.groupby("selector")["L2_star_abs"].mean()
     for name in ("lhs_nn", "lhs_assign", "eps_cell"):
         assert mean_l2[name] < mean_l2["random"], name
+
+
+# ---------------------------------------------------------------------------
+# Exact pairing and the certified sparse assignment
+# ---------------------------------------------------------------------------
+
+def test_select_lhs_nn_reports_exact_displacement():
+    """The reported snap distance is the true greedy pairing, never below the proxy."""
+    H, _ = _pool()
+    X = ss.minmax_normalize(H)
+    res = sd.select_lhs_nn(X, 30, seed=0)
+    a = ss.lhs_nn_assignment(X, 30, seed=0)
+    proxy = cdist(a.targets, X[res.rows]).min(axis=1)
+    np.testing.assert_allclose(res.info["snap_distances"], a.displacement)
+    assert np.all(res.info["snap_distances"] >= proxy - 1e-12)
+    assert res.info["n_fallback"] >= 0
+
+
+def test_knn_min_sum_matches_dense_assignment():
+    H, _ = _pool(M=200, seed=3)
+    X = ss.minmax_normalize(H)
+    a = ss.lhs_nn_assignment(X, 25, seed=4)
+    sparse = sd.knn_min_sum_assignment(a.targets, X, k_ladder=(4, 8, 16, 32, 64, 200))
+    rr, cc = linear_sum_assignment(cdist(a.targets, X))
+    dense_total = float(cdist(a.targets, X)[rr, cc].sum())
+    assert sparse.total == pytest.approx(dense_total, rel=1e-9)
+    assert sparse.certified
+    assert len(set(sparse.rows.tolist())) == 25
+    assert sparse.total <= a.displacement.sum() + 1e-12
+    assert sparse.total >= cdist(a.targets, X).min(axis=1).sum() - 1e-12
+
+
+def test_knn_min_sum_certified_rung_equals_complete_graph():
+    H, _ = _pool(M=150, seed=6)
+    X = ss.minmax_normalize(H)
+    a = ss.lhs_nn_assignment(X, 20, seed=1)
+    ladder = sd.knn_min_sum_assignment(a.targets, X, k_ladder=(2, 4, 8, 16, 32, 150))
+    complete = sd.knn_min_sum_assignment(a.targets, X, k_ladder=(150,))
+    assert ladder.certified and complete.certified
+    assert ladder.total == pytest.approx(complete.total, rel=1e-9)
+    assert ladder.k <= 150
+
+
+def test_knn_min_sum_infeasible_rung_advances():
+    """Coincident targets: k=1 cannot host a full matching, a later rung can."""
+    H, _ = _pool(M=60, seed=2)
+    X = ss.minmax_normalize(H)
+    targets = np.tile(X[[0]], (5, 1))
+    res = sd.knn_min_sum_assignment(targets, X, k_ladder=(1, 5, 10, 20, 60))
+    assert res.ladder[0]["feasible"] is False
+    assert res.k > 1 and len(set(res.rows.tolist())) == 5
+    assert res.certified
+
+
+def test_knn_min_sum_zero_distance_edge_kept():
+    H, _ = _pool(M=80, seed=5)
+    X = ss.minmax_normalize(H)
+    targets = np.vstack([X[[7]], X[[41]]])
+    res = sd.knn_min_sum_assignment(targets, X, k_ladder=(8, 80))
+    assert res.rows.tolist() == [7, 41]
+    assert res.total == pytest.approx(0.0, abs=1e-12)
+
+
+def test_knn_min_sum_ladder_must_reach_n():
+    H, _ = _pool(M=50)
+    X = ss.minmax_normalize(H)
+    targets = ss.generate_lhs_samples(10, 3, np.zeros(3), np.ones(3), seed=0)
+    with pytest.raises(ValueError):
+        sd.knn_min_sum_assignment(targets, X, k_ladder=(2, 4))

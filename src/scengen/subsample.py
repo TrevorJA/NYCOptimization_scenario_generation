@@ -47,9 +47,15 @@ rather than the quantity the selector optimized.
 algorithm are COPIED (not imported) from MOEA-FIND ``src/discovery/analysis.py``
 so this repo has no dependency on that repo. Pure numpy/scipy -- no SSI, no
 SynHydro, no pywrdrb -- so it is testable on any hazard matrix.
+
+``lhs_nn_assignment`` is the single implementation of the pairing rule. It keeps
+the target-to-member pairing (the design's target displacement); the selectors
+return only the sorted rows.
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.spatial import KDTree, cKDTree
@@ -256,9 +262,8 @@ def absolute_filling_subsample(
     Returns:
         Sorted integer array of ``n`` selected row indices into ``H``.
     """
-    return _lhs_nn_select(
-        minmax_normalize(H, lo_pct=lo_pct, hi_pct=hi_pct), n, seed=seed, k_pool=k_pool
-    )
+    X = minmax_normalize(H, lo_pct=lo_pct, hi_pct=hi_pct)
+    return np.sort(lhs_nn_assignment(X, n, seed=seed, k_pool=k_pool).rows)
 
 
 def cdf_filling_subsample(
@@ -288,48 +293,67 @@ def cdf_filling_subsample(
     Returns:
         Sorted integer array of ``n`` selected row indices into ``H``.
     """
-    return _lhs_nn_select(empirical_cdf_normalize(H), n, seed=seed, k_pool=k_pool)
+    X = empirical_cdf_normalize(H)
+    return np.sort(lhs_nn_assignment(X, n, seed=seed, k_pool=k_pool).rows)
 
 
-def _lhs_nn_select(
+@dataclass(frozen=True)
+class LhsNnAssignment:
+    """Target-to-member pairing of the LHS + nearest-unused-neighbour selection.
+
+    Attributes:
+        targets: ``(n, d)`` Latin hypercube targets in emission order.
+        rows: ``(n,)`` pool row assigned to each target, unsorted, so ``rows[i]``
+            pairs with ``targets[i]``.
+        displacement: ``(n,)`` Euclidean distance from each target to its member.
+        n_fallback: Targets whose ``k_pool`` nearest neighbours were all used, so
+            the member came from the global scan of unused rows.
+    """
+
+    targets: np.ndarray
+    rows: np.ndarray
+    displacement: np.ndarray
+    n_fallback: int
+
+
+def lhs_nn_assignment(
     X: np.ndarray, n: int, *, seed: int, k_pool: int | None = None
-) -> np.ndarray:
-    """LHS + nearest-neighbor selection over pool points already normalized to [0, 1]^d.
+) -> LhsNnAssignment:
+    """LHS targets snapped greedily, in emission order, to distinct pool rows.
 
-    Draws ``n`` Latin-hypercube anchors over the unit box and snaps each to the
-    nearest not-yet-used pool point (KDTree query over a local candidate pool;
-    global fallback if that pool is exhausted of unused neighbors). The snap is
-    what makes this a *selection* rather than a *generation* design -- see the
-    module docstring on why hazard coordinates cannot be generated to.
+    Draws ``n`` Latin-hypercube targets over the unit box and assigns each, in
+    the order the sampler emits them, to the nearest not-yet-used pool point
+    (KDTree query over ``k_pool`` neighbours; global scan of the unused rows if
+    those are exhausted). This is the sequential nearest-unused heuristic for the
+    minimum-total-displacement assignment of targets to pool rows; the exact
+    assignment and its gap are measured in ``selector_diagnostics``.
 
     Shared by the absolute-space (campaign) and rank-space (non-campaign
-    sensitivity) hazard selectors, which differ only in the normalization applied
-    to ``X``. It is not used for input-space stratification: forcing parameters
-    are a generator knob, so that design generates one realization per LHS point
-    instead.
+    sensitivity) selectors, which differ only in the normalization applied to
+    ``X`` and which return ``np.sort(rows)``. The pairing is kept here so the
+    target displacement can be reported.
 
     Args:
         X: ``(M, d)`` pool coordinates already normalized to the unit box.
         n: Number of points to select.
         seed: LHS RNG seed.
-        k_pool: Neighbors queried per anchor before the global fallback; defaults
-            to ``min(max(8, n // 4), M)`` (the MOEA-FIND heuristic).
+        k_pool: Neighbours queried per target before the global fallback;
+            defaults to ``min(max(8, n // 4), M)`` (the MOEA-FIND heuristic).
 
     Returns:
-        Sorted integer array of ``n`` selected row indices into ``X``.
+        The pairing, with ``rows`` in target emission order.
     """
     X = np.asarray(X, dtype=float)
     M, d = X.shape
     if n > M:
         raise ValueError(f"requested {n} but only {M} available")
-    if n == M:
-        return np.arange(M)
 
     anchors = generate_lhs_samples(n, d, np.zeros(d), np.ones(d), seed=seed)
 
     tree = cKDTree(X)
     chosen: list[int] = []
     used: set[int] = set()
+    n_fallback = 0
     if k_pool is None:
         k_pool = min(max(8, n // 4), M)
     for anchor in anchors:
@@ -343,6 +367,7 @@ def _lhs_nn_select(
                 break
         else:
             # Candidate pool exhausted of unused neighbors; global nearest.
+            n_fallback += 1
             mask = np.ones(M, dtype=bool)
             mask[list(used)] = False
             remaining = np.where(mask)[0]
@@ -352,4 +377,8 @@ def _lhs_nn_select(
             pick = int(remaining[np.argmin(d2)])
             used.add(pick)
             chosen.append(pick)
-    return np.sort(np.array(chosen, dtype=int))
+    rows = np.array(chosen, dtype=int)
+    displacement = np.sqrt(((anchors[: len(rows)] - X[rows]) ** 2).sum(axis=1))
+    return LhsNnAssignment(
+        targets=anchors, rows=rows, displacement=displacement, n_fallback=n_fallback
+    )

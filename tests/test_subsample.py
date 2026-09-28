@@ -156,3 +156,54 @@ def test_subsample_too_large_raises():
     H = _clustered_hazard_image(M=10, d=2)
     with pytest.raises(ValueError):
         subsample.cdf_filling_subsample(H, 11, seed=0)
+
+
+# ---------------------------------------------------------------------------
+# Pairing-preserving selection (lhs_nn_assignment)
+# ---------------------------------------------------------------------------
+
+#: Row lists captured from the selector before ``lhs_nn_assignment`` replaced the
+#: sorted-only loop; any change to the pairing rule's tie-breaking or query order
+#: changes these.
+_PINNED_ABS_3D = [70, 101, 108, 130, 143, 150, 153, 167, 214, 261, 267, 276, 282,
+                  283, 284, 285, 286, 289, 291, 292, 293, 294, 295, 297]
+_PINNED_ABS_6D = [21, 30, 67, 78, 82, 102, 112, 156, 207, 214, 220, 270, 277, 314,
+                  339, 354, 415, 431, 450, 453, 457, 458, 461, 464, 465, 466, 467,
+                  468, 469, 470, 471, 473, 474, 478, 481, 484, 487, 491, 492, 498]
+_PINNED_CDF_3D = [3, 16, 28, 45, 50, 52, 55, 58, 63, 77, 100, 114, 121, 145, 151,
+                  163, 174, 195, 209, 230, 233, 237, 249, 263]
+
+
+def test_lhs_nn_pinned_regression():
+    """The selectors reproduce the row lists pinned before the pairing refactor."""
+    a = subsample.absolute_filling_subsample(_clustered_hazard_image(M=300, d=3, seed=11), 24, seed=2)
+    b = subsample.absolute_filling_subsample(_clustered_hazard_image(M=500, d=6, seed=3), 40, seed=7)
+    c = subsample.cdf_filling_subsample(_clustered_hazard_image(M=300, d=3, seed=11), 24, seed=2)
+    assert a.tolist() == _PINNED_ABS_3D
+    assert b.tolist() == _PINNED_ABS_6D
+    assert c.tolist() == _PINNED_CDF_3D
+
+
+def test_lhs_nn_assignment_pairing_invariants():
+    H = _clustered_hazard_image(M=300, d=3, seed=11)
+    X = subsample.minmax_normalize(H)
+    a = subsample.lhs_nn_assignment(X, 24, seed=2)
+    assert a.rows.shape == (24,) and len(set(a.rows.tolist())) == 24
+    np.testing.assert_array_equal(
+        a.targets, subsample.generate_lhs_samples(24, 3, np.zeros(3), np.ones(3), seed=2)
+    )
+    np.testing.assert_allclose(
+        a.displacement, np.linalg.norm(a.targets - X[a.rows], axis=1)
+    )
+    np.testing.assert_array_equal(
+        np.sort(a.rows), subsample.absolute_filling_subsample(H, 24, seed=2)
+    )
+
+
+def test_lhs_nn_assignment_counts_fallbacks():
+    """Identical pool points: every target after the first exhausts k_pool=1."""
+    X = np.full((5, 2), 0.5)
+    a = subsample.lhs_nn_assignment(X, 5, seed=0, k_pool=1)
+    assert a.n_fallback == 4
+    assert sorted(a.rows.tolist()) == [0, 1, 2, 3, 4]
+    assert np.allclose(a.displacement, np.linalg.norm(a.targets - 0.5, axis=1))

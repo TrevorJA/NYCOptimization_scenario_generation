@@ -16,7 +16,7 @@ Selectors:
 
   - ``random``     — random without replacement (the null / control rule).
   - ``lhs_nn``     — LHS anchors + greedy nearest-unused-neighbor snap (the
-                     wired status-quo selector, ``subsample._lhs_nn_select``).
+                     wired status-quo selector, ``subsample.lhs_nn_assignment``).
   - ``lhs_assign`` — the same LHS anchors, but assigned to pool members by an
                      optimal one-to-one matching (min total squared distance,
                      Hungarian algorithm). Isolates the greedy snap's
@@ -37,6 +37,12 @@ Selectors:
                      device is the coverage analogue of epsilon-dominance
                      archiving (Laumanns et al. 2002).
 
+``knn_min_sum_assignment`` solves the exact minimum-total-displacement
+assignment of the same anchors to pool rows on a k-nearest-candidate graph, with
+a certificate of global optimality, so the greedy snap's gap to the exact
+solution is measured rather than assumed (the design formalization in
+NYCOptimization ``docs/notes/methods/hf_design_metrics.md``).
+
 Pure numpy/scipy/pandas — no SSI, no SynHydro, no pywrdrb — so the comparison
 runs on any staged hazard image, at laptop or HPC scale.
 """
@@ -48,8 +54,9 @@ from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import linear_sum_assignment
-from scipy.sparse.csgraph import minimum_spanning_tree
+from scipy.optimize import linear_sum_assignment, linprog
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import min_weight_full_bipartite_matching, minimum_spanning_tree
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 from scipy.stats import ks_2samp
@@ -67,8 +74,9 @@ class SelectorResult:
 
     Attributes:
         rows: Sorted selected row indices into the pool image.
-        info: Selector-specific diagnostics — ``snap_distances`` (anchor-to-
-            selected distance per anchor, LHS selectors), ``grid_resolution``
+        info: Selector-specific diagnostics — ``snap_distances`` (distance from
+            each anchor to the member assigned to it, in anchor emission order,
+            LHS selectors), ``n_fallback`` (``lhs_nn``), ``grid_resolution``
             and ``n_occupied_cells`` (``eps_cell``).
     """
 
@@ -83,15 +91,11 @@ def select_random(X: np.ndarray, n: int, *, seed: int) -> SelectorResult:
 
 def select_lhs_nn(X: np.ndarray, n: int, *, seed: int) -> SelectorResult:
     """LHS anchors + greedy nearest-unused-neighbor snap (the wired selector)."""
-    rows = ss._lhs_nn_select(X, n, seed=seed)
-    anchors = ss.generate_lhs_samples(
-        n, X.shape[1], np.zeros(X.shape[1]), np.ones(X.shape[1]), seed=seed
+    a = ss.lhs_nn_assignment(X, n, seed=seed)
+    return SelectorResult(
+        rows=np.sort(a.rows),
+        info={"snap_distances": a.displacement, "n_fallback": a.n_fallback},
     )
-    # Greedy pairing is order-dependent, so re-derive each anchor's realized
-    # partner by re-running the pairing order: nearest selected member works as
-    # the reporting proxy (exact for the non-contended anchors).
-    d = cdist(anchors, X[rows])
-    return SelectorResult(rows=rows, info={"snap_distances": d.min(axis=1)})
 
 
 def select_lhs_assign(X: np.ndarray, n: int, *, seed: int) -> SelectorResult:
@@ -107,6 +111,150 @@ def select_lhs_assign(X: np.ndarray, n: int, *, seed: int) -> SelectorResult:
     rr, cc = linear_sum_assignment(cost)
     snap = np.sqrt(cost[rr, cc])
     return SelectorResult(rows=np.sort(cc), info={"snap_distances": snap})
+
+
+@dataclass(frozen=True)
+class SparseAssignment:
+    """Exact minimum-total-displacement assignment of targets to pool rows.
+
+    Attributes:
+        rows: ``(n,)`` pool row assigned to each target, in target order.
+        displacement: ``(n,)`` Euclidean target-to-member distance.
+        total: Sum of ``displacement``.
+        k: Neighbours per target of the graph on which ``rows`` was solved.
+        certified: True when ``total`` is proven to be the global optimum over
+            every injective assignment into the whole pool.
+        slack: ``max_i (u_i - r_i(k))`` for the optimal dual potentials ``u``
+            of the sparse problem; non-positive when certified.
+        ladder: One record per rung tried: ``k``, ``feasible``, ``total``,
+            ``lp_total``, ``slack``, ``certified``.
+    """
+
+    rows: np.ndarray
+    displacement: np.ndarray
+    total: float
+    k: int
+    certified: bool
+    slack: float
+    ladder: tuple[dict, ...]
+
+
+def knn_min_sum_assignment(
+    targets: np.ndarray,
+    X: np.ndarray,
+    *,
+    k_ladder: Sequence[int],
+    tree: cKDTree | None = None,
+) -> SparseAssignment:
+    """Exact min-sum assignment of targets to pool rows on a k-nearest graph.
+
+    Solves ``min_sigma sum_i ||u_i - x_sigma(i)||`` over injective ``sigma`` by
+    min-weight full bipartite matching on the graph joining each target to its
+    ``k`` nearest pool rows, growing ``k`` along ``k_ladder`` until the solution
+    is certified globally optimal. Certificate (linear-programming duality):
+    the assignment LP on the sparse graph is solved for its dual potentials,
+    ``u_i`` per target and ``v_j <= 0`` per candidate in the graph (``v_j = 0``
+    for candidates outside it). Every excluded edge ``(i, j)`` has cost at
+    least the k-th neighbour radius ``r_i(k)``, so ``u_i <= r_i(k)`` for all
+    ``i`` makes the sparse dual feasible for the complete problem and, by
+    strong duality, proves the sparse optimum is the global optimum. A rung
+    with no full matching is skipped; the ladder must reach ``n`` so a full
+    matching exists at its last rung.
+
+    Weights are offset by 1.0 because the matcher treats zero weights as absent
+    edges; totals are recomputed from the true distances.
+
+    Args:
+        targets: ``(n, d)`` target points in the unit box.
+        X: ``(M, d)`` pool coordinates in the unit box.
+        k_ladder: Increasing neighbour counts to try (capped at ``M``).
+        tree: Prebuilt ``cKDTree(X)`` to reuse; built here if None.
+
+    Returns:
+        The assignment at the first certified rung (or the last rung).
+    """
+    targets = np.asarray(targets, dtype=float)
+    X = np.asarray(X, dtype=float)
+    n = targets.shape[0]
+    M = X.shape[0]
+    if n > M:
+        raise ValueError(f"requested {n} but only {M} available")
+    ladder_k = sorted({int(min(k, M)) for k in k_ladder if k >= 1})
+    if not ladder_k or ladder_k[-1] < n:
+        raise ValueError(f"k_ladder must reach n={n} (got {list(k_ladder)})")
+    if tree is None:
+        tree = cKDTree(X)
+
+    records: list[dict] = []
+    best: SparseAssignment | None = None
+    for k in ladder_k:
+        dist, idx = tree.query(targets, k=k)
+        dist = np.asarray(dist, dtype=float).reshape(n, k)
+        idx = np.asarray(idx, dtype=int).reshape(n, k)
+        uniq, col = np.unique(idx.ravel(), return_inverse=True)
+        infeasible = {"k": k, "feasible": False, "total": float("nan"), "certified": False}
+        if len(uniq) < n:  # fewer distinct candidates than targets: no full matching
+            records.append(infeasible)
+            continue
+        graph = csr_matrix(
+            (dist.ravel() + 1.0, (np.repeat(np.arange(n), k), col.ravel())),
+            shape=(n, len(uniq)),
+        )
+        try:
+            r, c = min_weight_full_bipartite_matching(graph)
+        except ValueError:
+            records.append(infeasible)
+            continue
+        if len(r) != n:  # the matcher saturated the smaller side, not the targets
+            records.append(infeasible)
+            continue
+        order = np.argsort(r)
+        rows = uniq[c[order]]
+        displacement = np.sqrt(((targets - X[rows]) ** 2).sum(axis=1))
+        total = float(displacement.sum())
+        lp_total, slack = _dual_certificate(dist, col, n_cols=len(uniq))
+        certified = bool(
+            k >= M
+            or (slack <= 1e-9 and abs(lp_total - total) <= 1e-7 * max(1.0, total))
+        )
+        records.append({"k": k, "feasible": True, "total": total, "lp_total": lp_total,
+                        "slack": slack, "certified": certified})
+        best = SparseAssignment(
+            rows=rows, displacement=displacement, total=total, k=k,
+            certified=certified, slack=float(slack), ladder=(),
+        )
+        if certified:
+            break
+    if best is None:  # unreachable when the ladder reaches n (Hall's condition)
+        raise RuntimeError("no rung of the k ladder admitted a full matching")
+    return SparseAssignment(
+        rows=best.rows, displacement=best.displacement, total=best.total, k=best.k,
+        certified=best.certified, slack=best.slack, ladder=tuple(records),
+    )
+
+
+def _dual_certificate(dist: np.ndarray, col: np.ndarray, *, n_cols: int) -> tuple[float, float]:
+    """LP objective and certificate slack ``max_i (u_i - r_i(k))`` of a kNN graph.
+
+    Args:
+        dist: ``(n, k)`` distances from each target to its k nearest rows.
+        col: ``(n, k)`` compact column index of those rows.
+        n_cols: Number of distinct rows in the graph.
+
+    Returns:
+        ``(lp_total, slack)``; ``slack <= 0`` certifies global optimality.
+    """
+    n, k = dist.shape
+    ne = n * k
+    edge = np.arange(ne)
+    a_eq = csr_matrix((np.ones(ne), (np.repeat(np.arange(n), k), edge)), shape=(n, ne))
+    a_ub = csr_matrix((np.ones(ne), (col.ravel(), edge)), shape=(n_cols, ne))
+    res = linprog(dist.ravel(), A_ub=a_ub, b_ub=np.ones(n_cols), A_eq=a_eq,
+                  b_eq=np.ones(n), bounds=(0, None), method="highs")
+    if not res.success:
+        return float("nan"), float("inf")
+    u = np.asarray(res.eqlin.marginals, dtype=float)
+    return float(res.fun), float(np.max(u - dist[:, -1]))
 
 
 def select_maximin(X: np.ndarray, n: int, *, seed: int) -> SelectorResult:
@@ -360,32 +508,28 @@ def distance_concentration(
 
 
 def snap_axis_contributions(
-    X: np.ndarray, rows: np.ndarray, axes: Sequence[str], *, seed: int
+    X: np.ndarray, n: int, axes: Sequence[str], *, seed: int
 ) -> dict[str, float]:
-    """Per-axis share of the squared anchor-to-selected snap distance.
+    """Per-axis share of the squared anchor-to-member snap displacement.
 
     The weighting diagnostic: correlated axes implicitly weight their shared
     hazard concept in the Euclidean snap distance. This measures each axis's
-    mean fractional contribution to the squared snap displacement (re-deriving
-    each anchor's partner as its nearest selected member — the reporting proxy
-    used for snap distances). Shares sum to 1 across axes.
+    mean fractional contribution to the squared displacement between each anchor
+    and the member the greedy rule assigned to it. Shares sum to 1 across axes.
 
     Args:
         X: ``(M, d)`` pool coordinates normalized to the unit box.
-        rows: Selected row indices (from ``lhs_nn`` at the same ``seed``).
+        n: Number of anchors (the ``lhs_nn`` ensemble size).
         axes: Axis names (columns of ``X``).
-        seed: The LHS seed that produced ``rows``.
+        seed: The LHS seed of the selection.
 
     Returns:
         ``{axis: mean fractional contribution}``.
     """
     X = np.asarray(X, dtype=float)
-    rows = np.asarray(rows, dtype=int)
     d = X.shape[1]
-    anchors = ss.generate_lhs_samples(len(rows), d, np.zeros(d), np.ones(d), seed=seed)
-    sel = X[rows]
-    nearest = np.argmin(cdist(anchors, sel), axis=1)
-    diff2 = (anchors - sel[nearest]) ** 2
+    a = ss.lhs_nn_assignment(X, n, seed=seed)
+    diff2 = (a.targets - X[a.rows]) ** 2
     tot = diff2.sum(axis=1, keepdims=True)
     shares = np.divide(diff2, tot, out=np.full_like(diff2, 1.0 / d), where=tot > 0)
     mean_share = shares.mean(axis=0)
