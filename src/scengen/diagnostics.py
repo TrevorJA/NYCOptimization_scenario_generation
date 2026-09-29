@@ -37,11 +37,16 @@ def save_hazard_image(
     *,
     H: np.ndarray,
     hazard_axes,
+    supplement: np.ndarray,
+    supplement_names,
     realization_ids,
     selected_rows,
     reference_start: str,
     scenario_stamp_start: str | None = None,
     dry_cut_months: int | None = None,
+    dry_scoring_rule: str | None = None,
+    wet_scoring_rule: str | None = None,
+    supplement_scoring_rule: str | None = None,
     chosen_axes=None,
 ) -> Path:
     """Persist a pool hazard image + the selected rows for offline diagnostics.
@@ -54,6 +59,10 @@ def save_hazard_image(
         path: Output ``.npz`` path.
         H: ``(M, m)`` pool hazard image of the full candidate axes (raw values).
         hazard_axes: Length-``m`` candidate-axis names (columns of ``H``).
+        supplement: ``(M, s)`` supplementary descriptors aligned with ``H``
+            rows (``compute_candidate_hazard_image(..., return_supplement=True)``).
+        supplement_names: Length-``s`` supplement column names
+            (``hazard_metrics.SUPPLEMENT_METRICS``).
         realization_ids: Length-``M`` pool realization ids aligned with ``H`` rows.
         selected_rows: Indices into ``H`` of the selected subset.
         reference_start: Start date the SSI reference fit was stamped with
@@ -72,31 +81,71 @@ def save_hazard_image(
             :func:`load_hazard_image` rejects an image whose recorded cut
             differs from the current one, so an image scored on another dry
             window is refused rather than mixed.
+        dry_scoring_rule: The dry-axis scoring rule the image was scored under
+            (defaults to the current ``hazard_metrics._DRY_SCORING_RULE``).
+            Fourth provenance leg: :func:`load_hazard_image` rejects an image
+            whose recorded rule differs from the current one, so an image
+            scored under another rule is refused rather than mixed.
+        wet_scoring_rule: The wet-axis scoring rule the image was scored under
+            (defaults to the current ``hazard_metrics._WET_SCORING_RULE``).
+            Fifth provenance leg, checked like the fourth.
+        supplement_scoring_rule: The scoring rule of the supplement (defaults
+            to the current ``hazard_metrics._SUPPLEMENT_SCORING_RULE``). Sixth
+            provenance leg, checked like the fourth.
         chosen_axes: The screened subset of ``hazard_axes`` actually used for
             selection (defaults to all of ``hazard_axes``).
 
     Returns:
         The written path.
+
+    Raises:
+        ValueError: If ``supplement`` is not one row per ``H`` row and one
+            column per supplement name.
     """
-    from .hazard_metrics import _DRY_CUT_MONTHS, _SCENARIO_STAMP_START
+    from .hazard_metrics import (
+        _DRY_CUT_MONTHS,
+        _DRY_SCORING_RULE,
+        _SCENARIO_STAMP_START,
+        _SUPPLEMENT_SCORING_RULE,
+        _WET_SCORING_RULE,
+    )
 
     path = Path(path)
+    H = np.asarray(H, dtype=float)
+    supplement = np.asarray(supplement, dtype=float)
+    supplement_names = list(supplement_names)
+    if supplement.shape != (H.shape[0], len(supplement_names)):
+        raise ValueError(
+            f"supplement has shape {supplement.shape}, expected {H.shape[0]} rows (one "
+            f"per H row) x {len(supplement_names)} columns (one per supplement name)."
+        )
     if chosen_axes is None:
         chosen_axes = list(hazard_axes)
     if scenario_stamp_start is None:
         scenario_stamp_start = _SCENARIO_STAMP_START
     if dry_cut_months is None:
         dry_cut_months = _DRY_CUT_MONTHS
+    if dry_scoring_rule is None:
+        dry_scoring_rule = _DRY_SCORING_RULE
+    if wet_scoring_rule is None:
+        wet_scoring_rule = _WET_SCORING_RULE
+    if supplement_scoring_rule is None:
+        supplement_scoring_rule = _SUPPLEMENT_SCORING_RULE
     np.savez(
         path,
-        H=np.asarray(H, dtype=float),
+        H=H,
         hazard_axes=np.asarray(list(hazard_axes), dtype=object),
         chosen_axes=np.asarray(list(chosen_axes), dtype=object),
+        supplement=supplement,
+        supplement_names=np.asarray(supplement_names, dtype=object),
         realization_ids=np.asarray(list(realization_ids), dtype=int),
         selected_rows=np.asarray(list(selected_rows), dtype=int),
         reference_start=np.asarray(str(reference_start), dtype=object),
         scenario_stamp_start=np.asarray(str(scenario_stamp_start), dtype=object),
         dry_cut_months=np.asarray(int(dry_cut_months)),
+        dry_scoring_rule=np.asarray(str(dry_scoring_rule), dtype=object),
+        wet_scoring_rule=np.asarray(str(wet_scoring_rule), dtype=object),
+        supplement_scoring_rule=np.asarray(str(supplement_scoring_rule), dtype=object),
     )
     return path
 
@@ -105,12 +154,14 @@ def check_hazard_image_provenance(data, path: str | Path) -> None:
     """Refuse a persisted hazard image scored under another convention.
 
     Every hazard-image writer (:func:`save_hazard_image`, the E_test
-    sub-window scorer and the historic-window cache) persists three
+    sub-window scorer and the historic-window cache) persists six
     provenance legs, and every reader checks them here before using the
     coordinates: ``reference_start`` must be present, ``scenario_stamp_start``
-    must equal the current scenario stamp, and ``dry_cut_months`` must equal
-    the current dry-axis cut. Coordinates from an image failing any leg are
-    not commensurable with current ones.
+    must equal the current scenario stamp, ``dry_cut_months`` must equal the
+    current dry-axis cut, and ``dry_scoring_rule``, ``wet_scoring_rule`` and
+    ``supplement_scoring_rule`` must equal the current scoring rules of the
+    dry axes, the wet axes and the supplement. Coordinates from an image
+    failing any leg are not commensurable with current ones.
 
     Args:
         data: The opened ``.npz`` (any mapping of field name to array).
@@ -119,7 +170,13 @@ def check_hazard_image_provenance(data, path: str | Path) -> None:
     Raises:
         ValueError: Naming the failing leg.
     """
-    from .hazard_metrics import _DRY_CUT_MONTHS, _SCENARIO_STAMP_START
+    from .hazard_metrics import (
+        _DRY_CUT_MONTHS,
+        _DRY_SCORING_RULE,
+        _SCENARIO_STAMP_START,
+        _SUPPLEMENT_SCORING_RULE,
+        _WET_SCORING_RULE,
+    )
 
     if "reference_start" not in data:
         raise ValueError(
@@ -141,6 +198,18 @@ def check_hazard_image_provenance(data, path: str | Path) -> None:
             f"image was scored on another dry window and is stale. Regenerate the "
             f"hazard image."
         )
+    for field, current, scored in (
+        ("dry_scoring_rule", _DRY_SCORING_RULE, "dry-axis"),
+        ("wet_scoring_rule", _WET_SCORING_RULE, "wet-axis"),
+        ("supplement_scoring_rule", _SUPPLEMENT_SCORING_RULE, "supplement"),
+    ):
+        rule = str(data[field]) if field in data else None
+        if rule != current:
+            raise ValueError(
+                f"{path} records {field}={rule!r}, but the current {scored} "
+                f"scoring rule is {current!r}: the image was scored under another "
+                f"rule and is stale. Regenerate the hazard image."
+            )
 
 
 def load_hazard_image(path: str | Path) -> dict:
@@ -148,8 +217,9 @@ def load_hazard_image(path: str | Path) -> dict:
 
     Raises:
         ValueError: If :func:`check_hazard_image_provenance` rejects the file:
-            it lacks ``reference_start``, records another scenario stamp, or
-            records another dry-axis cut. Its hazard coordinates must not be
+            it lacks ``reference_start``, records another scenario stamp,
+            another dry-axis cut, or another scoring rule of the dry axes, the
+            wet axes or the supplement. Its hazard coordinates must not be
             mixed with current-convention artifacts.
     """
     path = Path(path)
@@ -161,10 +231,15 @@ def load_hazard_image(path: str | Path) -> dict:
         "H": data["H"],
         "hazard_axes": axes,
         "chosen_axes": chosen,
+        "supplement": data["supplement"],
+        "supplement_names": [str(a) for a in data["supplement_names"]],
         "realization_ids": data["realization_ids"].astype(int),
         "selected_rows": data["selected_rows"].astype(int),
         "reference_start": str(data["reference_start"]),
         "dry_cut_months": int(data["dry_cut_months"]),
+        "dry_scoring_rule": str(data["dry_scoring_rule"]),
+        "wet_scoring_rule": str(data["wet_scoring_rule"]),
+        "supplement_scoring_rule": str(data["supplement_scoring_rule"]),
     }
 
 

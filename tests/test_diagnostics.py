@@ -81,21 +81,39 @@ def test_redundancy_screen_flags_correlated_axes():
 
 def test_save_load_hazard_image_roundtrip(tmp_path):
     H = _clustered_hazard_image(M=50, d=3)
+    S = np.arange(100, dtype=float).reshape(50, 2)
     sel = ss.cdf_filling_subsample(H, 8, seed=0)
     path = dg.save_hazard_image(
         tmp_path / "hazard_image.npz",
         H=H, hazard_axes=["a", "b", "c"],
+        supplement=S, supplement_names=["s", "t"],
         realization_ids=list(range(50)), selected_rows=sel,
         reference_start="1945-01-01",
     )
     back = dg.load_hazard_image(path)
     np.testing.assert_allclose(back["H"], H)
     assert back["hazard_axes"] == ["a", "b", "c"]
+    np.testing.assert_array_equal(back["supplement"], S)
+    assert back["supplement_names"] == ["s", "t"]
     np.testing.assert_array_equal(back["selected_rows"], sel)
     assert back["reference_start"] == "1945-01-01"
-    from scengen.hazard_metrics import _DRY_CUT_MONTHS
+    from scengen import hazard_metrics as hm
 
-    assert back["dry_cut_months"] == _DRY_CUT_MONTHS
+    assert back["dry_cut_months"] == hm._DRY_CUT_MONTHS
+    assert back["dry_scoring_rule"] == hm._DRY_SCORING_RULE
+    assert back["wet_scoring_rule"] == hm._WET_SCORING_RULE
+    assert back["supplement_scoring_rule"] == hm._SUPPLEMENT_SCORING_RULE
+
+
+def test_save_hazard_image_rejects_a_misaligned_supplement(tmp_path):
+    H = _clustered_hazard_image(M=20, d=2)
+    with pytest.raises(ValueError, match="supplement has shape"):
+        dg.save_hazard_image(
+            tmp_path / "bad.npz", H=H, hazard_axes=["a", "b"],
+            supplement=np.zeros((19, 2)), supplement_names=["s", "t"],
+            realization_ids=list(range(20)), selected_rows=[0],
+            reference_start="1945-01-01",
+        )
 
 
 def test_load_hazard_image_rejects_another_dry_cut(tmp_path):
@@ -107,6 +125,7 @@ def test_load_hazard_image_rejects_another_dry_cut(tmp_path):
     H = _clustered_hazard_image(M=20, d=2)
     other = dg.save_hazard_image(
         tmp_path / "other_cut.npz", H=H, hazard_axes=["a", "b"],
+        supplement=np.zeros((20, 1)), supplement_names=["s"],
         realization_ids=list(range(20)), selected_rows=[0, 1],
         reference_start="1945-01-01", dry_cut_months=_DRY_CUT_MONTHS + 5,
     )
@@ -128,6 +147,51 @@ def test_load_hazard_image_rejects_another_dry_cut(tmp_path):
         dg.load_hazard_image(missing)
     with np.load(missing, allow_pickle=True) as z:
         with pytest.raises(ValueError, match="dry_cut_months"):
+            dg.check_hazard_image_provenance(z, missing)
+
+
+@pytest.mark.parametrize(
+    "field", ["dry_scoring_rule", "wet_scoring_rule", "supplement_scoring_rule"]
+)
+def test_load_hazard_image_rejects_another_scoring_rule(tmp_path, field):
+    """The scoring rules of the dry axes, the wet axes and the supplement are
+    the fourth to sixth provenance legs: an image recording another rule, or
+    none at all, was scored differently and must not load."""
+    from scengen import hazard_metrics as hm
+
+    H = _clustered_hazard_image(M=20, d=2)
+    other = dg.save_hazard_image(
+        tmp_path / "other_rule.npz", H=H, hazard_axes=["a", "b"],
+        supplement=np.zeros((20, 1)), supplement_names=["s"],
+        realization_ids=list(range(20)), selected_rows=[0, 1],
+        reference_start="1945-01-01", **{field: "another-rule"},
+    )
+    with pytest.raises(ValueError, match=f"{field}='another-rule'"):
+        dg.load_hazard_image(other)
+
+    rules = {
+        "dry_scoring_rule": hm._DRY_SCORING_RULE,
+        "wet_scoring_rule": hm._WET_SCORING_RULE,
+        "supplement_scoring_rule": hm._SUPPLEMENT_SCORING_RULE,
+    }
+    del rules[field]
+    missing = tmp_path / "no_rule.npz"
+    np.savez(
+        missing,
+        H=H,
+        hazard_axes=np.asarray(["a", "b"], dtype=object),
+        chosen_axes=np.asarray(["a", "b"], dtype=object),
+        realization_ids=np.arange(20),
+        selected_rows=np.asarray([0, 1]),
+        reference_start=np.asarray("1945-01-01", dtype=object),
+        scenario_stamp_start=np.asarray(hm._SCENARIO_STAMP_START, dtype=object),
+        dry_cut_months=np.asarray(hm._DRY_CUT_MONTHS),
+        **{name: np.asarray(rule, dtype=object) for name, rule in rules.items()},
+    )
+    with pytest.raises(ValueError, match=f"{field}=None"):
+        dg.load_hazard_image(missing)
+    with np.load(missing, allow_pickle=True) as z:
+        with pytest.raises(ValueError, match=f"{field}=None"):
             dg.check_hazard_image_provenance(z, missing)
 
 

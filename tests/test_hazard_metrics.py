@@ -58,7 +58,10 @@ def test_critical_event_descriptors_are_nonnegative_and_complete():
     calc = hm.fit_reference_ssi(ref)
     ssi = calc.transform(hm.flows_to_series(_synthetic_monthly(5, seed=1, dip=(24, 36))))
     out = hm.critical_event_descriptors(ssi)
-    assert set(out) == {"duration", "magnitude", "severity", "onset_rate", "recovery_rate"}
+    assert set(out) == {
+        "duration", "magnitude", "severity", "development_rate", "termination_rate",
+        "onset_truncated", "termination_truncated", "event_count", "total_deficit",
+    }
     assert all(np.isfinite(v) and v >= 0.0 for v in out.values())
 
 
@@ -87,17 +90,20 @@ def test_scored_dry_series_starts_in_june_after_the_exclusion_window():
     n_months = 12 * 5 - 6
     scen = _synthetic_monthly(5, seed=1)[:n_months]
 
-    ssi = hm.scored_dry_ssi(calc, scen)
+    ssi, ssi_pre = hm.scored_dry_ssi(calc, scen)
     assert len(ssi) == n_months - 6
     assert (ssi.index[0].year, ssi.index[0].month, ssi.index[0].day) == (
         pd.Timestamp(hm._SCENARIO_STAMP_START).year + 1, 6, 1)
     assert ssi.index[-1].month == 5
     assert not ssi.isna().any()
+    # The month before the window is the last excluded month (May of year 1).
+    full = calc.transform(hm.flows_to_series(scen))
+    assert ssi_pre == full.loc[ssi.index[0] - pd.DateOffset(months=1)]
 
     H, names = hm.compute_candidate_hazard_image(
         scen[None, :], _synthetic_daily(5, seed=1)[None, :], ref_m, ref_d,
     )
-    d = hm.critical_event_descriptors(ssi)
+    d = hm.critical_event_descriptors(ssi, ssi_pre=ssi_pre)
     expected = [d[m.removeprefix("drought_")] for m in hm.DRY_EVENT_METRICS]
     np.testing.assert_allclose(H[0, :len(hm.DRY_EVENT_METRICS)], expected)
 
@@ -141,7 +147,10 @@ def test_pot_flood_descriptors_respond_to_a_pulse():
         _synthetic_daily(5, seed=1, spike=(400, 410)),
         threshold=threshold, ref_mean=ref_mean,
     )
-    assert set(plain) == {"peak_discharge", "pulse_duration", "rise_rate"}
+    assert set(plain) == {
+        "peak_discharge", "pulse_duration", "rise_rate",
+        "pulse_count", "days_above", "pulse_volume",
+    }
     assert spiked["peak_discharge"] > plain["peak_discharge"]
     assert spiked["pulse_duration"] >= plain["pulse_duration"]
 
@@ -316,4 +325,220 @@ def test_prefit_kwargs_bypass_and_match_the_cache_path():
     with pytest.raises(ValueError, match="prefit_dry_calc requires"):
         hm.compute_candidate_hazard_image(
             scen_m, scen_d, ref_m, ref_d, prefit_dry_calc=dry_calc,
+        )
+
+
+def _ssi_series(values):
+    """Monthly SSI series with the given values, preceded and followed by surplus months."""
+    vals = [0.5] * 6 + list(values) + [0.5] * 6
+    return pd.Series(vals, index=pd.date_range("2000-01-01", periods=len(vals), freq="MS"))
+
+
+def test_phase_rates_count_elapsed_months_from_the_crossings():
+    """Development and termination durations include the crossing month (Parry et al. 2016)."""
+    # onset -0.5, minimum -1.5 two months later, last negative month two months after that
+    out = hm.critical_event_descriptors(_ssi_series([-0.5, -1.2, -1.5, -0.8, -0.2]))
+    assert out["severity"] == pytest.approx(1.5)
+    assert out["development_rate"] == pytest.approx(1.5 / 3)
+    assert out["termination_rate"] == pytest.approx(1.5 / 3)
+
+
+def test_phase_rates_when_the_minimum_is_the_first_month():
+    out = hm.critical_event_descriptors(_ssi_series([-1.4, -0.6, -0.1]))
+    assert out["development_rate"] == pytest.approx(1.4)      # one-month development phase
+    assert out["termination_rate"] == pytest.approx(1.4 / 3)
+
+
+def test_termination_rate_counts_wet_interludes_as_elapsed_time():
+    """A short positive interlude inside the event (below the 3-month termination) adds elapsed months."""
+    out = hm.critical_event_descriptors(_ssi_series([-1.2, 0.2, -0.3]))
+    assert out["duration"] == pytest.approx(2.0)               # negative months only
+    assert out["termination_rate"] == pytest.approx(1.2 / 3)   # minimum -> last negative month: 2 + 1
+
+
+def test_untruncated_event_keeps_the_observed_phase_rates():
+    """An event inside the window is flagged on neither side, whatever ssi_pre says."""
+    for ssi_pre in (None, -0.5, 0.5):
+        out = hm.critical_event_descriptors(
+            _ssi_series([-0.5, -1.2, -1.5, -0.8, -0.2]), ssi_pre=ssi_pre
+        )
+        assert not out["onset_truncated"] and not out["termination_truncated"]
+        assert out["development_rate"] == pytest.approx(1.5 / 3)
+        assert out["termination_rate"] == pytest.approx(1.5 / 3)
+        assert out["event_count"] == 1.0
+
+
+def test_open_event_at_the_series_end_is_recorded_and_can_control():
+    """A qualifying run still below zero in the last month is an event, and the
+    controlling one when its deficit is the largest."""
+    z = [0.5, -1.2, -0.4, 0.3, 0.3, 0.3, 0.5, -0.6, -1.5, -2.0, -1.1]
+    events = hm.drought_events(z)
+    assert [(e.start, e.end, e.peak) for e in events] == [(1, 2, 1), (7, 10, 9)]
+
+    out = hm.critical_event_descriptors(z, ssi_pre=0.5)
+    assert out["magnitude"] == pytest.approx(5.2)
+    assert out["duration"] == 4.0
+    assert out["severity"] == pytest.approx(2.0)
+    assert not out["onset_truncated"] and out["termination_truncated"]
+    assert out["development_rate"] == pytest.approx(2.0 / 3)
+    assert out["termination_rate"] == pytest.approx(0.9)       # (-1.1 - -2.0) / 1 month
+    assert out["event_count"] == 2.0
+    assert out["total_deficit"] == pytest.approx(1.6 + 5.2)
+
+
+def test_recovered_but_unconfirmed_event_is_recorded_with_an_observed_termination():
+    """Two non-negative months before the series ends do not close the event, but
+    it is recorded, and its termination (last negative month) is inside the window."""
+    z = [0.4, -0.5, -1.3, -0.7, 0.2, 0.1]
+    events = hm.drought_events(z)
+    assert [(e.start, e.end, e.peak, e.duration) for e in events] == [(1, 3, 2, 3)]
+
+    out = hm.critical_event_descriptors(z, ssi_pre=0.4)
+    assert out["magnitude"] == pytest.approx(2.5)
+    assert not out["termination_truncated"]
+    assert out["termination_rate"] == pytest.approx(1.3 / 2)
+
+
+def test_truncated_onset_rate_is_the_in_window_decline():
+    z = [-0.4, -1.0, -1.6, -0.5, 0.2, 0.2, 0.2]
+    for ssi_pre in (-0.3, None, float("nan")):
+        out = hm.critical_event_descriptors(z, ssi_pre=ssi_pre)
+        assert out["onset_truncated"] and not out["termination_truncated"]
+        assert out["development_rate"] == pytest.approx((-0.4 + 1.6) / 2)
+        assert out["termination_rate"] == pytest.approx(1.6 / 2)
+
+
+def test_non_negative_ssi_pre_leaves_an_edge_onset_observed():
+    """An event starting at the first scored month after a non-negative month
+    crossed zero inside the window: standard development rate."""
+    z = [-0.4, -1.0, -1.6, -0.5, 0.2, 0.2, 0.2]
+    for ssi_pre in (0.1, 0.0):
+        out = hm.critical_event_descriptors(z, ssi_pre=ssi_pre)
+        assert not out["onset_truncated"]
+        assert out["development_rate"] == pytest.approx(1.6 / 3)
+
+
+def test_truncated_termination_rate_is_the_in_window_recovery():
+    out = hm.critical_event_descriptors([0.3, -0.5, -1.8, -1.2, -0.4], ssi_pre=0.3)
+    assert not out["onset_truncated"] and out["termination_truncated"]
+    assert out["development_rate"] == pytest.approx(1.8 / 2)
+    assert out["termination_rate"] == pytest.approx((-0.4 + 1.8) / 2)
+
+
+def test_truncated_phase_rates_are_zero_with_the_minimum_on_the_edge():
+    onset = hm.critical_event_descriptors([-1.5, -0.8, -0.2, 0.3, 0.3, 0.3])
+    assert onset["onset_truncated"]
+    assert onset["development_rate"] == 0.0
+    assert onset["termination_rate"] == pytest.approx(1.5 / 3)
+
+    end = hm.critical_event_descriptors([0.2, -0.4, -1.1], ssi_pre=0.2)
+    assert end["termination_truncated"]
+    assert end["termination_rate"] == 0.0
+    assert end["development_rate"] == pytest.approx(1.1 / 2)
+
+    both = hm.critical_event_descriptors([-1.2, -0.3, -0.9], ssi_pre=-0.1)
+    assert both["onset_truncated"] and both["termination_truncated"]
+    assert both["development_rate"] == 0.0
+    assert both["termination_rate"] == pytest.approx((-0.9 + 1.2) / 2)
+
+
+def test_reference_ssi_is_standard_normal_in_every_calendar_month():
+    """The two-parameter gamma (location fixed at zero) standardizes every
+    calendar month of a near-normal reference record, where a free location
+    lets maximum likelihood degenerate."""
+    ref = np.random.default_rng(0).normal(100.0, 15.0, size=78 * 12)
+    calc = hm.fit_reference_ssi(ref)
+    assert all(d.loc == 0.0 for d in calc.fitted_distributions.values())
+    ssi = calc.transform(hm.flows_to_series(ref, start_date=hm._REFERENCE_START))
+    sd = ssi.groupby(ssi.index.month).std(ddof=0)
+    assert len(sd) == 12
+    assert ((sd >= 0.9) & (sd <= 1.1)).all()
+
+
+def test_flow_regime_descriptors_on_a_hand_checkable_series():
+    """Two 360-day years of 30-day months: 2.0 then 1.0, a 3-day spike to 5.0 in
+    year 1 and a 7-day dip to 0.3 in year 2, normalized by ref_mean = 2."""
+    x = np.r_[np.full(360, 2.0), np.full(360, 1.0)]
+    x[100:103] = 5.0
+    x[450:457] = 0.3
+    y1, y2 = 729.0 / 360, 355.1 / 360
+    out = hm.flow_regime_descriptors(x, np.full(24, 30), ref_mean=2.0)
+    assert out["lowflow_min_12month"] == pytest.approx(y2 / 2)
+    assert out["lowflow_min_24month"] == pytest.approx(1084.1 / 720 / 2)
+    assert out["lowflow_min_year"] == pytest.approx(y2 / 2)
+    assert out["highflow_max_year"] == pytest.approx(y1 / 2)
+    assert out["lowflow_min_7day"] == pytest.approx(0.15)
+    assert out["flood_max_3day"] == pytest.approx(2.5)
+    assert out["annual_cv"] == pytest.approx(abs(y1 - y2) / np.sqrt(2) / ((y1 + y2) / 2))
+    assert out["flashiness"] == pytest.approx(8.4 / 1084.1)
+
+    with pytest.raises(ValueError, match="at least 24 months"):
+        hm.flow_regime_descriptors(x[:690], np.full(23, 30), ref_mean=2.0)
+    with pytest.raises(ValueError, match="at least 24 months"):
+        hm.flow_regime_descriptors(x[:-1], np.full(24, 30), ref_mean=2.0)
+
+
+def test_pot_supplement_counts_runs_and_the_critical_pulse_volume():
+    daily = np.array([0.0, 5.0, 6.0, 0.0, 7.0, 9.0, 8.0, 0.0, 4.0])
+    out = hm.pot_flood_descriptors(daily, threshold=3.5, ref_mean=2.0)
+    assert out["pulse_count"] == 3.0
+    assert out["days_above"] == 6.0
+    assert out["pulse_duration"] == 3.0
+    assert out["pulse_volume"] == pytest.approx((3.5 + 5.5 + 4.5) / 2.0)
+
+
+def _calendar_scenario(start, n_ffmp_years, *, seed):
+    """Daily flows on the true calendar from ``start`` through May of the last
+    FFMP year, their monthly means, and the six-month daily cut."""
+    t0 = pd.Timestamp(start)
+    days = pd.date_range(t0, t0 + pd.DateOffset(months=6 + 12 * n_ffmp_years), freq="D")[:-1]
+    daily = pd.Series(np.random.default_rng(seed).gamma(2.0, 100.0, len(days)), index=days)
+    cut = int((days < t0 + pd.DateOffset(months=6)).sum())
+    return daily.resample("MS").mean().to_numpy(), daily.to_numpy(), cut
+
+
+def test_supplement_comes_from_the_same_pass_on_the_scored_window():
+    """The supplement leaves H untouched, and each column is the named descriptor
+    of the scored window, with true month lengths (February 2004 has 29 days)."""
+    ref_m, ref_d = _synthetic_monthly(78, seed=0), _synthetic_daily(78, seed=0)
+    start = "2002-12-01"
+    monthly, daily, cut = _calendar_scenario(start, 3, seed=7)
+    args = (monthly[None, :], daily[None, :], ref_m, ref_d)
+
+    H, names = hm.compute_candidate_hazard_image(*args, wet_exclusion_days=cut)
+    H_s, names_s, S, s_names = hm.compute_candidate_hazard_image(
+        *args, wet_exclusion_days=cut, return_supplement=True, scenario_start=start,
+    )
+    np.testing.assert_array_equal(H_s, H)
+    assert names_s == names
+    assert s_names == list(hm.SUPPLEMENT_METRICS)
+    assert S.shape == (1, len(hm.SUPPLEMENT_METRICS))
+
+    calc, threshold, ref_mean = hm.get_reference_fits(ref_m, ref_d)
+    ssi, ssi_pre = hm.scored_dry_ssi(calc, monthly)
+    d = hm.critical_event_descriptors(ssi, ssi_pre=ssi_pre)
+    w = hm.pot_flood_descriptors(daily[cut:], threshold=threshold, ref_mean=ref_mean)
+    month_days = np.diff(pd.date_range("2003-06-01", "2006-06-01", freq="MS").to_numpy())
+    month_days = month_days.astype("timedelta64[D]").astype(int)
+    assert month_days[8] == 29
+    f = hm.flow_regime_descriptors(daily[cut:], month_days, ref_mean=ref_mean)
+    expected = {f"drought_{k}": v for k, v in d.items()}
+    expected |= {f"flood_{k}": v for k, v in w.items()} | f
+    np.testing.assert_allclose(S[0], [float(expected[n]) for n in hm.SUPPLEMENT_METRICS])
+
+
+def test_supplement_requires_a_consistent_calendar():
+    ref_m, ref_d = _synthetic_monthly(78, seed=0), _synthetic_daily(78, seed=0)
+    monthly, daily, cut = _calendar_scenario("2002-12-01", 3, seed=7)
+    args = (monthly[None, :], daily[None, :], ref_m, ref_d)
+    with pytest.raises(ValueError, match="requires scenario_start"):
+        hm.compute_candidate_hazard_image(*args, wet_exclusion_days=cut, return_supplement=True)
+    with pytest.raises(ValueError, match="does not span exactly"):
+        hm.compute_candidate_hazard_image(
+            *args, wet_exclusion_days=cut + 1, return_supplement=True,
+            scenario_start="2002-12-01",
+        )
+    with pytest.raises(ValueError, match="first day of calendar month"):
+        hm.compute_candidate_hazard_image(
+            *args, wet_exclusion_days=cut, return_supplement=True, scenario_start="2003-01-01",
         )

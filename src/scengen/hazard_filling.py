@@ -52,7 +52,7 @@ from . import subsample as ss
 #: first, then duration/intensity, then the rate facets.
 DEFAULT_AXIS_PRIORITY: tuple[str, ...] = (
     "drought_magnitude", "drought_duration", "drought_severity",
-    "drought_onset_rate", "drought_recovery_rate",
+    "drought_development_rate", "drought_termination_rate",
     "flood_peak_discharge", "flood_pulse_duration", "flood_rise_rate",
 )
 
