@@ -89,6 +89,10 @@ class ForcingEnsembleConfig:
         bound_pct: Percentiles defining each harmonic parameter's CMIP6 range (default (5, 95), the
             empirical 90% range).
         margin: Optional fractional widening of the harmonic-parameter hypercube.
+        axis_bounds: Optional per-axis overrides of the widened box, ``{axis: (lo, hi)}`` with
+            ``None`` keeping the box value (:func:`scengen.forcing_space.override_axis_bounds`);
+            applied to the mean axes only. The held-out test ensemble extends its annual-volume
+            lower bound with it.
         start_date: Date of day 0 of each realization. Must be a December 1 (the epoch is
             chosen so the 6-month metric exclusion ends on June 1, the FFMP operating-year
             boundary): the generator synthesizes calendar-year (January-anchored) sequences,
@@ -124,6 +128,7 @@ class ForcingEnsembleConfig:
     std_csv: str | Path | None = None
     bound_pct: tuple[float, float] = (5.0, 95.0)
     margin: float = 0.0
+    axis_bounds: Mapping[str, tuple[float | None, float | None]] = field(default_factory=dict)
     start_date: str = "1945-12-01"
     store_daily: bool = True
     hazard_block_size: int = 256

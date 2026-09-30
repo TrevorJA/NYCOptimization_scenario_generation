@@ -7,8 +7,8 @@ the controlling drought event of the monthly aggregate NYC inflow (magnitude,
 duration, severity, development rate, termination rate) and three wet axes from
 peaks-over-threshold on the daily aggregate NYC inflow (peak discharge, pulse
 duration, rise rate). The two tails deliberately use different event models --
-see the run-theory section below. The candidate set is then screened per pool to
-a low-redundancy subset (Olden & Poff; :mod:`scengen.diagnostics` and
+see the run-theory section below. The candidate set is then screened per pool
+for degenerate and near-duplicate axes (:mod:`scengen.diagnostics` and
 :func:`scengen.hazard_filling.select_from_candidate_image`), so the axes are
 never hard-coded into the design.
 

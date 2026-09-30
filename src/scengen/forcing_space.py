@@ -27,7 +27,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
-from typing import Final
+from typing import Final, Mapping
 
 import numpy as np
 import pandas as pd
@@ -298,6 +298,39 @@ def _draw_box(
     raise ValueError(f"unknown sampling method: {method!r}")
 
 
+def override_axis_bounds(
+    lo: np.ndarray, hi: np.ndarray, names: list[str],
+    axis_bounds: Mapping[str, tuple[float | None, float | None]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replace named per-axis bounds of a harmonic-parameter box.
+
+    Args:
+        lo: ``(d,)`` lower bounds of the box (from :func:`harmonic_param_box`).
+        hi: ``(d,)`` upper bounds.
+        names: Axis names in box order.
+        axis_bounds: ``{axis: (lo, hi)}``; ``None`` on either side keeps the box value.
+            Amplitude lower bounds stay floored at 0.
+
+    Returns:
+        ``(lo, hi)`` copies with the overrides applied.
+
+    Raises:
+        ValueError: On an unknown axis name or an empty interval.
+    """
+    lo, hi = np.array(lo, dtype=float), np.array(hi, dtype=float)
+    for name, (new_lo, new_hi) in axis_bounds.items():
+        if name not in names:
+            raise ValueError(f"axis_bounds names unknown axis {name!r}; box axes are {names}")
+        i = names.index(name)
+        if new_lo is not None:
+            lo[i] = max(0.0, float(new_lo)) if name.startswith("r") else float(new_lo)
+        if new_hi is not None:
+            hi[i] = float(new_hi)
+        if not lo[i] < hi[i]:
+            raise ValueError(f"axis_bounds for {name!r} give an empty interval [{lo[i]}, {hi[i]}]")
+    return lo, hi
+
+
 def sample_harmonic_forcing(
     n_profiles: int,
     envelope: pd.DataFrame | np.ndarray,
@@ -310,6 +343,7 @@ def sample_harmonic_forcing(
     fix_phase: bool = True,
     return_params: bool = False,
     method: str = "lhs",
+    axis_bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
 ):
     """Draw forcing profiles over the CMIP6-based interpretable harmonic-parameter hypercube.
 
@@ -350,6 +384,12 @@ def sample_harmonic_forcing(
             ``"lhs"`` remains correct where the *drawn sample itself* is used as a space-filling
             design and is never subsampled.
 
+        axis_bounds: Optional per-axis overrides of the box, ``{axis: (lo, hi)}`` on the
+            intrinsic names (``m``, ``r1``, ``r2``, ...); ``None`` keeps the box value. Applied
+            after ``bound_pct`` and ``margin`` (:func:`override_axis_bounds`), so one axis can
+            extend beyond the CMIP6 span asymmetrically, which is how the held-out test
+            ensemble sets its annual-volume lower bound.
+
     Returns:
         ``(n_profiles, 12)`` water-year change factors; or ``(profiles, params, names)`` if
         ``return_params``, where ``params`` is the ``(n_profiles, d)`` matrix of **intrinsic**
@@ -361,6 +401,8 @@ def sample_harmonic_forcing(
     """
     fit = fit_harmonic_params(envelope, order=order)
     lo, hi, names = harmonic_param_box(fit, bound_pct=bound_pct, margin=margin)
+    if axis_bounds:
+        lo, hi = override_axis_bounds(lo, hi, names, axis_bounds)
     if not fix_phase:
         plan = _draw_box(n_profiles, lo, hi, seed=seed, method=method)
         profiles = reconstruct_harmonic(plan, order=order, floor=floor)
@@ -445,6 +487,7 @@ def forcing_hash(
     start_date: str,
     baseline_period: tuple[str, str],
     full_period: tuple[str, str],
+    axis_bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
 ) -> str:
     """Return a stable content hash of the forcing-space configuration for the provenance manifest.
 
@@ -457,4 +500,6 @@ def forcing_hash(
     h.update(str(Path(envelope_csv)).encode())
     h.update(f"{margin!r}|{seed!r}".encode())
     h.update(f"{start_date!r}|{tuple(baseline_period)!r}|{tuple(full_period)!r}".encode())
+    if axis_bounds:
+        h.update(repr(sorted((k, tuple(v)) for k, v in axis_bounds.items())).encode())
     return h.hexdigest()

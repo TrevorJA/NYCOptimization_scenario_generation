@@ -453,9 +453,9 @@ def redundancy_screen(
 ) -> dict:
     """Spearman redundancy screen on the hazard axes (methods 3.3, exploratory).
 
-    Flags axis pairs with ``|rho_S| >= threshold`` (Olden & Poff 2003 redundancy
-    cut). Reported on the master pool's hazard image so the axis set can be
-    pruned before scaling up.
+    Flags axis pairs with ``|rho_S| >= threshold`` (default 0.7, the collinearity
+    level of Dormann et al. 2013). Reported on the master pool's hazard image so
+    the axis set can be pruned before scaling up.
 
     Returns:
         Dict with the ``axes`` list, the Spearman correlation matrix ``rho``, and
@@ -474,7 +474,7 @@ def redundancy_screen(
 
 
 # ---------------------------------------------------------------------------
-# Hazard-axis screening (Olden & Poff 2003 — candidate-pool reduction)
+# Hazard-axis screening (degeneracy and rank-correlation structure)
 # ---------------------------------------------------------------------------
 
 def per_metric_spread(H: np.ndarray, hazard_axes) -> dict:
@@ -516,7 +516,7 @@ def per_metric_spread(H: np.ndarray, hazard_axes) -> dict:
 def spearman_clusters(
     H: np.ndarray, hazard_axes, *, threshold: float = 0.7, priority=None
 ) -> dict:
-    """Average-linkage Spearman clustering of axes (Olden & Poff 2003 framing).
+    """Average-linkage Spearman clustering of axes (default cut: Dormann et al. 2013).
 
     A **diagnostic only**: the correlation structure (matrix and ``1 - |rho_S|``
     cluster tree) is reported alongside the axis selection, never used to reduce

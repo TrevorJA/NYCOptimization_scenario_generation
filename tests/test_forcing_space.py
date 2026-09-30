@@ -340,3 +340,40 @@ def test_forcing_hash_stable_and_sensitive():
     h5 = fs.forcing_hash(p, seed=0, **{**kw, "full_period": ("1946-01-01", "2021-12-31")})
     assert h1 == h2
     assert len({h1, h3, h4, h5}) == 4
+
+
+def test_axis_bounds_override_extends_one_axis_only():
+    env = _toy_envelope()
+    fit = fs.fit_harmonic_params(env, order=2)
+    lo, hi, names = fs.harmonic_param_box(fit, margin=0.25)
+    new_lo = lo[names.index("m")] - 0.2
+    lo2, hi2 = fs.override_axis_bounds(lo, hi, names, {"m": (new_lo, None)})
+    assert lo2[names.index("m")] == pytest.approx(new_lo)
+    assert hi2[names.index("m")] == pytest.approx(hi[names.index("m")])
+    untouched = [i for i, n in enumerate(names) if n != "m"]
+    np.testing.assert_array_equal(lo2[untouched], lo[untouched])
+    np.testing.assert_array_equal(hi2[untouched], hi[untouched])
+    _, params, pnames = fs.sample_harmonic_forcing(
+        400, env, seed=3, margin=0.25, return_params=True, axis_bounds={"m": (new_lo, None)},
+    )
+    m = params[:, pnames.index("m")]
+    assert m.min() < lo[names.index("m")] - 1e-9  # the extension is sampled
+    assert m.min() >= new_lo - 1e-9 and m.max() <= hi[names.index("m")] + 1e-9
+    with pytest.raises(ValueError):
+        fs.override_axis_bounds(lo, hi, names, {"psi9": (0.0, 1.0)})
+    with pytest.raises(ValueError):
+        fs.override_axis_bounds(lo, hi, names, {"m": (hi[names.index("m")] + 1.0, None)})
+    lo3, _ = fs.override_axis_bounds(lo, hi, names, {"r1": (-0.5, None)})
+    assert lo3[names.index("r1")] == 0.0  # amplitude floor kept
+
+
+def test_forcing_hash_sensitive_to_axis_bounds():
+    p = np.ones((5, 12))
+    kw = dict(
+        envelope_csv="a.csv", margin=0.25, seed=0,
+        start_date="1945-12-01",
+        baseline_period=("1980-01-01", "2019-12-31"),
+        full_period=("1945-01-01", "2023-12-31"),
+    )
+    assert fs.forcing_hash(p, **kw) == fs.forcing_hash(p, axis_bounds={}, **kw)
+    assert fs.forcing_hash(p, **kw) != fs.forcing_hash(p, axis_bounds={"m": (-0.22, None)}, **kw)

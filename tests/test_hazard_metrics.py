@@ -335,7 +335,7 @@ def _ssi_series(values):
 
 
 def test_phase_rates_count_elapsed_months_from_the_crossings():
-    """Development and termination durations include the crossing month (Parry et al. 2016)."""
+    """Development and termination durations include the crossing month."""
     # onset -0.5, minimum -1.5 two months later, last negative month two months after that
     out = hm.critical_event_descriptors(_ssi_series([-0.5, -1.2, -1.5, -0.8, -0.2]))
     assert out["severity"] == pytest.approx(1.5)
